@@ -23,17 +23,24 @@ for gated hosts.
 ## Design
 
 Enforcement lives **outside the model**. The model only proposes a host and a
-command; whether it runs is decided by non-model code:
+command; whether it runs is decided by non-model code. ssh-mcp is one binary
+with three subcommands:
 
-- **`ssh-mcp serve`** — the long-lived MCP server. It owns the host inventory,
-  evaluates policy, runs SSH commands, and writes the audit log.
-- **`ssh-mcp hook`** — a `PreToolUse` hook that is a pure proxy: it relays the
-  request to the server and returns the server's decision. It holds no policy
-  logic.
+- **`ssh-mcp daemon`** — the resident server, shared by every Claude Code
+  session. It owns the host inventory, the SSH connection pool, policy
+  evaluation, and the audit log.
+- **`ssh-mcp serve`** — the MCP server the harness spawns per session. It is a
+  thin shim that relays bytes between the harness and the daemon; it speaks no
+  MCP itself.
+- **`ssh-mcp hook`** — a `PreToolUse` hook, a pure proxy that forwards a policy
+  query to the daemon and returns its decision. It holds no policy logic.
 
-Policy for a host is a set of gates (`free`, `def`, `claude`, `hook`) composed
-strictest-wins. The server is the single reader of the inventory; the hook
-never reads it.
+The shim and the hook reach the daemon over Unix sockets under
+`~/.ssh/ssh-mcp/` — there is no TCP port and no network surface. The sockets
+are owner-only, and the daemon checks each connection's peer credentials.
+
+A host's `policy` is a set of gates (`free`, `def`, `claude`, `hook`) composed
+strictest-wins. The daemon is the single reader of the inventory.
 
 ## Build
 
@@ -41,12 +48,90 @@ never reads it.
 cargo build --release
 ```
 
-The binary is `ssh-mcp`, with subcommands `serve` and `hook`.
+The binary is `ssh-mcp`, with subcommands `daemon`, `serve`, and `hook`.
+Install it somewhere stable, for example:
 
-## Status
+```sh
+cp target/release/ssh-mcp ~/.local/bin/ssh-mcp
+```
 
-Early development. The scaffold builds; the policy evaluator, SSH execution
-core, MCP server, and hook proxy are being implemented.
+## Setup
+
+Three things need wiring (macOS with Claude Code).
+
+### 1. The host inventory
+
+Describe your hosts in `~/.ssh/ssh-mcp.toml`:
+
+```toml
+[defaults]
+exec_timeout_secs = 120
+
+[hosts.build-rig]
+hostname = "10.0.5.12"
+user     = "ci"
+purpose  = "Linux build server"
+tags     = ["build"]
+policy   = ["free"]
+
+[hosts.staging-api]
+hostname = "10.0.2.8"
+user     = "deploy"
+purpose  = "Staging API host"
+tags     = ["api"]
+policy   = ["def"]
+[hosts.staging-api.def]
+allow = ["Bash(systemctl status:*)"]
+ask   = ["Bash(systemctl restart:*)"]
+deny  = ["Bash(rm:*)"]
+```
+
+`free` runs without a prompt; `def` applies the rules written inline under
+`[hosts.<alias>.def]`; `claude` applies the rules from `~/.claude/settings.json`;
+`{ hook = "..." }` delegates to an external hook program. Each host must
+already be in `~/.ssh/known_hosts`, and your SSH agent must hold a key it
+accepts.
+
+### 2. The daemon
+
+The daemon must be resident. On macOS, run it as a LaunchAgent — edit the
+binary path in [`contrib/ssh-mcp-daemon.plist`](contrib/ssh-mcp-daemon.plist),
+then:
+
+```sh
+cp contrib/ssh-mcp-daemon.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/ssh-mcp-daemon.plist
+```
+
+The daemon needs `SSH_AUTH_SOCK` to reach your SSH agent; if it cannot find
+the agent, set it in the plist's `EnvironmentVariables`.
+
+### 3. Claude Code
+
+Add to `~/.claude/settings.json`:
+
+```jsonc
+{
+  "mcpServers": {
+    "ssh": { "command": "<path>/ssh-mcp", "args": ["serve"] }
+  },
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "mcp__ssh__exec",
+        "hooks": [ { "type": "command", "command": "<path>/ssh-mcp hook" } ] }
+    ]
+  }
+}
+```
+
+- Do **not** put `mcp__ssh__exec` in any `permissions` list. The hook is the
+  only policy gate; a native `ask` rule would fire even when the hook allows,
+  so free hosts would still be prompted.
+- Keep `Bash(ssh *)` in `permissions.ask` so raw `ssh` from the `Bash` tool is
+  not a bypass.
+- Protect the trust root by denying edits to it: add `Edit(~/.ssh/ssh-mcp.toml)`,
+  `Edit(~/.ssh/ssh-mcp/**)`, `Edit(~/.claude/settings.json)`, and the path of
+  the `ssh-mcp` binary to `permissions.ask` (or `deny`).
 
 ## Contributing
 
