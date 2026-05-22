@@ -12,6 +12,7 @@ pub mod daemon;
 pub mod hook;
 pub mod import;
 pub mod mcp;
+pub mod pathnorm;
 pub mod paths;
 pub mod policy;
 pub mod serve;

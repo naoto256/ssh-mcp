@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use super::Decision;
-use super::permission::PermissionSet;
+use super::permission::{PermissionSet, Tool};
 use crate::config::{Gate, HostEntry, HostsConfig, NamedGate, Permissions};
 
 /// The subset of `~/.claude/settings.json` the `claude` gate needs.
@@ -19,6 +19,23 @@ use crate::config::{Gate, HostEntry, HostsConfig, NamedGate, Permissions};
 struct ClaudeSettings {
     #[serde(default)]
     permissions: Permissions,
+}
+
+/// What a host policy is being evaluated against: a shell command, as `exec`
+/// runs it, or a file path accessed with a tool, as a transfer does.
+pub enum Subject<'a> {
+    Command(&'a str),
+    Path { tool: Tool, path: &'a str },
+}
+
+impl Subject<'_> {
+    /// Apply a rule set to this subject, in the form each one expects.
+    fn evaluate(&self, set: &PermissionSet) -> Decision {
+        match self {
+            Subject::Command(command) => set.evaluate_command(command),
+            Subject::Path { tool, path } => set.check(*tool, path),
+        }
+    }
 }
 
 /// Evaluates host policies. Holds the path to the user's Claude Code settings
@@ -66,10 +83,21 @@ impl Evaluator {
         if host.policy.is_empty() {
             return Ok(Decision::Allow);
         }
-        let rules = self.evaluate_rule_gates(host, command)?;
+        let rules = self.evaluate_rule_gates(host, &Subject::Command(command))?;
         let mut decisions = rules.decisions;
         decisions.extend(rules.hook_programs.iter().map(|_| Decision::Unset));
         Ok(combine_gates(&decisions, Decision::Ask))
+    }
+
+    /// Check a local path against the user's Claude Code settings alone.
+    ///
+    /// This gates the local side of a file transfer, independent of the host's
+    /// own policy: a `free` host means the remote may be used freely, never
+    /// that a transfer may read or write a local path the user's own rules
+    /// protect.
+    pub fn check_user_path(&self, tool: Tool, path: &str) -> Result<Decision> {
+        let set = PermissionSet::from_permissions(&self.load_claude_permissions()?)?;
+        Ok(set.check(tool, path))
     }
 
     /// Evaluate the rule-based gates (`free`, `def`, `claude`) of a non-empty
@@ -78,7 +106,7 @@ impl Evaluator {
     ///
     /// The caller handles the empty-policy and unknown-host cases, runs the
     /// returned hook programs, and applies [`combine_gates`] to the full set.
-    pub fn evaluate_rule_gates(&self, host: &HostEntry, command: &str) -> Result<RuleGates> {
+    pub fn evaluate_rule_gates(&self, host: &HostEntry, subject: &Subject) -> Result<RuleGates> {
         // The `def` and `claude` gates share the Claude Code rule grammar, so
         // their rules are merged into one set and evaluated once.
         let mut merged = Permissions::default();
@@ -105,7 +133,7 @@ impl Evaluator {
 
         if has_rule_gate {
             let set = PermissionSet::from_permissions(&merged)?;
-            decisions.push(set.evaluate_command(command));
+            decisions.push(subject.evaluate(&set));
         }
 
         Ok(RuleGates {
@@ -304,6 +332,72 @@ mod tests {
             Decision::Deny
         );
         assert_eq!(ev.evaluate(&cfg, "h", "ls -la").unwrap(), Decision::Allow);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_path_subject_is_checked_against_the_rule_gates() {
+        let cfg = config(
+            r#"
+            [hosts.staging]
+            hostname = "h"
+            purpose  = "p"
+            policy   = ["def"]
+            [hosts.staging.def]
+            deny  = ["Read(//etc/**)"]
+            allow = ["Edit(//srv/**)"]
+        "#,
+        );
+        let host = cfg.host("staging").unwrap();
+        let ev = evaluator();
+
+        let denied = ev
+            .evaluate_rule_gates(
+                host,
+                &Subject::Path {
+                    tool: Tool::Read,
+                    path: "/etc/shadow",
+                },
+            )
+            .unwrap();
+        assert_eq!(denied.decisions, vec![Decision::Deny]);
+
+        let allowed = ev
+            .evaluate_rule_gates(
+                host,
+                &Subject::Path {
+                    tool: Tool::Write,
+                    path: "/srv/app/data",
+                },
+            )
+            .unwrap();
+        assert_eq!(allowed.decisions, vec![Decision::Allow]);
+    }
+
+    #[test]
+    fn check_user_path_applies_the_user_settings() {
+        let path =
+            std::env::temp_dir().join(format!("ssh-mcp-test-userpath-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{ "permissions": { "deny": ["Read(//secret/**)"], "allow": ["Edit(//work/**)"] } }"#,
+        )
+        .unwrap();
+        let ev = Evaluator::with_claude_settings_path(path.clone());
+
+        assert_eq!(
+            ev.check_user_path(Tool::Read, "/secret/key").unwrap(),
+            Decision::Deny
+        );
+        assert_eq!(
+            ev.check_user_path(Tool::Write, "/work/output").unwrap(),
+            Decision::Allow
+        );
+        assert_eq!(
+            ev.check_user_path(Tool::Read, "/elsewhere/file").unwrap(),
+            Decision::Unset
+        );
 
         std::fs::remove_file(&path).ok();
     }

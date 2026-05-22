@@ -297,13 +297,12 @@ impl PermissionSet {
     /// path for the file tools.
     pub fn check(&self, tool: Tool, arg: &str) -> Decision {
         let hit = |rules: &[Permission]| {
-            rules.iter().any(|rule| {
-                rule.tool == tool
-                    && match tool {
-                        Tool::Bash => rule.matches_command(arg),
-                        Tool::Read | Tool::Edit | Tool::Write => rule.matches_path(arg),
-                        Tool::Other => false,
-                    }
+            rules.iter().any(|rule| match (tool, rule.tool) {
+                (Tool::Bash, Tool::Bash) => rule.matches_command(arg),
+                (Tool::Read, Tool::Read) => rule.matches_path(arg),
+                // A Claude Code `Edit` rule governs writes too, and vice versa.
+                (Tool::Edit | Tool::Write, Tool::Edit | Tool::Write) => rule.matches_path(arg),
+                _ => false,
             })
         };
         if hit(&self.deny) {

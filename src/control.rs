@@ -16,14 +16,17 @@ use tokio::net::UnixStream;
 
 use crate::audit::AuditLog;
 use crate::config::HostsConfig;
-use crate::policy::{Decision, Evaluator, combine_gates};
+use crate::pathnorm::{normalize_local, normalize_remote};
+use crate::policy::{Decision, Evaluator, Subject, Tool, combine_gates};
 
-/// The PreToolUse request the hook forwards: the tool input, plus the session's
-/// permission mode, which sets the no-match fallback.
+/// The PreToolUse request the hook forwards: the tool name and its input, plus
+/// the session's permission mode, which sets the no-match fallback.
 #[derive(Deserialize)]
 struct PreToolUseRequest {
     #[serde(default, alias = "permissionMode")]
     permission_mode: Option<String>,
+    #[serde(default, alias = "toolName")]
+    tool_name: Option<String>,
     #[serde(default)]
     tool_input: ToolInput,
 }
@@ -31,7 +34,25 @@ struct PreToolUseRequest {
 #[derive(Deserialize, Default)]
 struct ToolInput {
     host: Option<String>,
+    /// Present for `exec`.
     command: Option<String>,
+    /// Present for `get_file` and `put_file`.
+    remote_path: Option<String>,
+    local_path: Option<String>,
+}
+
+/// The direction of a file transfer.
+#[derive(Clone, Copy)]
+enum TransferDir {
+    Get,
+    Put,
+}
+
+/// A file transfer request, as the control handler sees it.
+struct Transfer<'a> {
+    direction: TransferDir,
+    remote_path: &'a str,
+    local_path: &'a str,
 }
 
 /// Handle one control-socket connection. This never panics and always writes a
@@ -76,27 +97,62 @@ async fn process(
         .permission_mode
         .clone()
         .unwrap_or_else(|| "default".to_string());
+    let fallback = fallback_for_mode(&mode);
     let host = request
         .tool_input
         .host
+        .clone()
         .context("the request carries no host")?;
-    let command = request
-        .tool_input
-        .command
-        .context("the request carries no command")?;
 
     let config = HostsConfig::load(config_path).context("loading the host inventory")?;
-    let decision = decide(
-        evaluator,
-        &config,
-        &host,
-        &command,
-        &raw,
-        fallback_for_mode(&mode),
-    )
-    .await;
 
-    audit.record_decision(&host, &command, &mode, decision_label(decision));
+    let tool = request.tool_name.as_deref().unwrap_or_default();
+    let (decision, summary) = match tool {
+        "mcp__ssh__get_file" | "mcp__ssh__put_file" => {
+            let remote = request
+                .tool_input
+                .remote_path
+                .clone()
+                .context("the transfer request carries no remote_path")?;
+            let local = request
+                .tool_input
+                .local_path
+                .clone()
+                .context("the transfer request carries no local_path")?;
+            let direction = if tool == "mcp__ssh__get_file" {
+                TransferDir::Get
+            } else {
+                TransferDir::Put
+            };
+            let transfer = Transfer {
+                direction,
+                remote_path: &remote,
+                local_path: &local,
+            };
+            let decision =
+                decide_transfer(evaluator, &config, &host, &transfer, &raw, fallback).await;
+            (decision, format!("{tool} {remote} <-> {local}"))
+        }
+        _ => {
+            let command = request
+                .tool_input
+                .command
+                .clone()
+                .context("the request carries no command")?;
+            let decision = decide_subject(
+                evaluator,
+                &config,
+                &host,
+                Subject::Command(&command),
+                &raw,
+                fallback,
+            )
+            .await;
+            (decision, command)
+        }
+    };
+
+    audit.record_decision(&host, &summary, &mode, decision_label(decision));
     Ok((host, decision))
 }
 
@@ -122,14 +178,14 @@ fn decision_label(decision: Decision) -> &'static str {
     }
 }
 
-/// Compose a host's full policy decision: the rule-based gates plus every
-/// `hook` gate, combined strictest-wins. `fallback` is the no-match outcome
-/// for the request's permission mode.
-async fn decide(
+/// Compose a host's full policy decision for one subject: the rule-based gates
+/// plus every `hook` gate, combined strictest-wins. `fallback` is the no-match
+/// outcome for the request's permission mode.
+async fn decide_subject(
     evaluator: &Evaluator,
     config: &HostsConfig,
     host: &str,
-    command: &str,
+    subject: Subject<'_>,
     raw_request: &str,
     fallback: Decision,
 ) -> Decision {
@@ -142,7 +198,7 @@ async fn decide(
         return Decision::Allow;
     }
 
-    let rule_gates = match evaluator.evaluate_rule_gates(host_entry, command) {
+    let rule_gates = match evaluator.evaluate_rule_gates(host_entry, &subject) {
         Ok(gates) => gates,
         Err(e) => {
             eprintln!("ssh-mcp: rule evaluation failed, denying: {e:#}");
@@ -155,6 +211,68 @@ async fn decide(
         decisions.push(run_subhook(program, raw_request).await);
     }
     combine_gates(&decisions, fallback)
+}
+
+/// Decide a file transfer. A transfer has two independent sides: the remote
+/// path, gated by the host's own policy, and the local path, gated by the
+/// user's Claude Code settings regardless of the host. Both are resolved to a
+/// concrete decision and the stricter one wins — so a `free` host can never
+/// let a transfer touch a local path the user's own rules protect.
+async fn decide_transfer(
+    evaluator: &Evaluator,
+    config: &HostsConfig,
+    host: &str,
+    transfer: &Transfer<'_>,
+    raw_request: &str,
+    fallback: Decision,
+) -> Decision {
+    // A path that will not normalize is treated as hostile and denied. Both
+    // sides are normalized here, exactly as the transfer itself normalizes
+    // them, so the gate and the transfer can never disagree on a `..`.
+    let remote = match normalize_remote(transfer.remote_path) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("ssh-mcp: rejecting a transfer with a bad remote path: {e:#}");
+            return Decision::Deny;
+        }
+    };
+    let local = match normalize_local(transfer.local_path) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("ssh-mcp: rejecting a transfer with a bad local path: {e:#}");
+            return Decision::Deny;
+        }
+    };
+    let local = local.to_string_lossy();
+
+    // A download reads the remote and writes the local; an upload, the reverse.
+    let (remote_tool, local_tool) = match transfer.direction {
+        TransferDir::Get => (Tool::Read, Tool::Write),
+        TransferDir::Put => (Tool::Write, Tool::Read),
+    };
+
+    let remote_decision = decide_subject(
+        evaluator,
+        config,
+        host,
+        Subject::Path {
+            tool: remote_tool,
+            path: &remote,
+        },
+        raw_request,
+        fallback,
+    )
+    .await;
+
+    let local_decision = match evaluator.check_user_path(local_tool, &local) {
+        Ok(decision) => combine_gates(&[decision], fallback),
+        Err(e) => {
+            eprintln!("ssh-mcp: local policy check failed, denying: {e:#}");
+            return Decision::Deny;
+        }
+    };
+
+    combine_gates(&[remote_decision, local_decision], fallback)
 }
 
 /// Run one `hook` gate. A gate that cannot be evaluated fails closed.
