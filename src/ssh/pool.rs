@@ -6,34 +6,20 @@
 //! transparent.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use russh::keys::agent::AgentIdentity;
-use russh::keys::agent::client::AgentClient;
 use russh::{Channel, ChannelMsg, client};
 use tokio::sync::Mutex;
 
+use super::connect::{CONNECT_TIMEOUT, SshConnector, resolve_chain};
 use super::handler::StrictHostKey;
-use crate::config::{HostEntry, HostsConfig};
-
-/// The SSH port used when a host does not specify one.
-const DEFAULT_SSH_PORT: u16 = 22;
+use crate::config::HostsConfig;
 
 /// How long to wait for a session channel to open before treating the pooled
 /// connection as dead — a healthy connection opens one in a single round trip.
 const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// How long to wait for a connection — TCP, the SSH handshake, and agent auth,
-/// across every ProxyJump hop — to be established before giving up.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Send an SSH keepalive after this much silence: it keeps a long no-output
-/// command from being dropped by an idle network middlebox, and lets russh
-/// notice a frozen peer (russh closes the connection after `keepalive_max`).
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The result of running one remote command.
 #[derive(Debug, Clone)]
@@ -48,21 +34,15 @@ pub struct ExecOutput {
 /// A pool of live SSH connections, keyed by host alias.
 pub struct ConnectionPool {
     connections: Mutex<HashMap<String, Arc<client::Handle<StrictHostKey>>>>,
-    config: Arc<client::Config>,
-    known_hosts: PathBuf,
+    connector: SshConnector,
 }
 
 impl ConnectionPool {
     /// Create an empty pool that verifies hosts against `~/.ssh/known_hosts`.
     pub fn new() -> Result<Self> {
-        let home = std::env::var_os("HOME").context("HOME is not set")?;
         Ok(Self {
             connections: Mutex::new(HashMap::new()),
-            config: Arc::new(client::Config {
-                keepalive_interval: Some(KEEPALIVE_INTERVAL),
-                ..Default::default()
-            }),
-            known_hosts: PathBuf::from(home).join(".ssh").join("known_hosts"),
+            connector: SshConnector::new()?,
         })
     }
 
@@ -107,12 +87,11 @@ impl ConnectionPool {
         if let Some(handle) = connections.get(host_alias) {
             return Ok(handle.clone());
         }
+        let chain = resolve_chain(config, host_alias)?;
         // Bound the whole connection setup (TCP, handshake, auth, every hop):
         // russh imposes no handshake timeout, so a stalled peer would hang.
         let handle =
-            match tokio::time::timeout(CONNECT_TIMEOUT, self.connect_chain(config, host_alias))
-                .await
-            {
+            match tokio::time::timeout(CONNECT_TIMEOUT, self.connector.connect(&chain)).await {
                 Ok(result) => Arc::new(result?),
                 Err(_) => bail!(
                     "connecting to {host_alias:?} timed out after {} seconds",
@@ -122,109 +101,6 @@ impl ConnectionPool {
         connections.insert(host_alias.to_string(), handle.clone());
         Ok(handle)
     }
-
-    /// Establish a connection to a host, tunneling through its jump hosts.
-    async fn connect_chain(
-        &self,
-        config: &HostsConfig,
-        host_alias: &str,
-    ) -> Result<client::Handle<StrictHostKey>> {
-        let target = resolve(config, host_alias)?;
-
-        // The hop sequence: each jump host, nearest first, then the target.
-        let mut hops: Vec<&str> = target.proxy_jump.iter().map(String::as_str).collect();
-        hops.push(host_alias);
-
-        // The first hop is reached by a direct TCP connection.
-        let first = resolve(config, hops[0])?;
-        let first_port = port_of(first);
-        let mut handle = client::connect(
-            self.config.clone(),
-            (first.hostname.as_str(), first_port),
-            self.host_key_handler(&first.hostname, first_port),
-        )
-        .await
-        .with_context(|| format!("failed to connect to {:?}", hops[0]))?;
-        authenticate(&mut handle, &user_of(first)).await?;
-
-        // Each later hop is tunneled through the connection before it.
-        for &alias in &hops[1..] {
-            let hop = resolve(config, alias)?;
-            let hop_port = port_of(hop);
-            let tunnel = handle
-                .channel_open_direct_tcpip(
-                    hop.hostname.clone(),
-                    u32::from(hop_port),
-                    "127.0.0.1",
-                    0,
-                )
-                .await
-                .with_context(|| format!("failed to open a tunnel to {alias:?}"))?;
-            let mut next = client::connect_stream(
-                self.config.clone(),
-                tunnel.into_stream(),
-                self.host_key_handler(&hop.hostname, hop_port),
-            )
-            .await
-            .with_context(|| format!("SSH handshake with {alias:?} failed"))?;
-            authenticate(&mut next, &user_of(hop)).await?;
-            handle = next;
-        }
-        Ok(handle)
-    }
-
-    fn host_key_handler(&self, hostname: &str, port: u16) -> StrictHostKey {
-        StrictHostKey::new(hostname, port, self.known_hosts.clone())
-    }
-}
-
-fn resolve<'a>(config: &'a HostsConfig, alias: &str) -> Result<&'a HostEntry> {
-    config
-        .host(alias)
-        .with_context(|| format!("host {alias:?} is not in the inventory"))
-}
-
-/// The SSH port for a host: its configured port, else the default.
-fn port_of(host: &HostEntry) -> u16 {
-    host.port.unwrap_or(DEFAULT_SSH_PORT)
-}
-
-/// The login user for a host: its configured user, else `$USER`.
-fn user_of(host: &HostEntry) -> String {
-    host.user
-        .clone()
-        .or_else(|| std::env::var("USER").ok())
-        .unwrap_or_else(|| "root".to_string())
-}
-
-/// Authenticate a connection using the keys held by the SSH agent. Each hop
-/// authenticates locally, so no key ever leaves this machine.
-async fn authenticate(handle: &mut client::Handle<StrictHostKey>, user: &str) -> Result<()> {
-    let mut agent = AgentClient::connect_env()
-        .await
-        .context("could not reach the SSH agent ($SSH_AUTH_SOCK)")?;
-    let identities = agent
-        .request_identities()
-        .await
-        .context("could not list SSH agent identities")?;
-    if identities.is_empty() {
-        bail!("the SSH agent holds no identities");
-    }
-    let hash_alg = handle.best_supported_rsa_hash().await?.flatten();
-
-    for identity in identities {
-        let key = match identity {
-            AgentIdentity::PublicKey { key, .. } => key,
-            AgentIdentity::Certificate { .. } => continue,
-        };
-        let result = handle
-            .authenticate_publickey_with(user, key, hash_alg, &mut agent)
-            .await?;
-        if result.success() {
-            return Ok(());
-        }
-    }
-    bail!("SSH agent authentication failed for user {user:?}")
 }
 
 /// Open a session channel, bounded so a frozen pooled connection is detected
