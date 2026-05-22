@@ -16,7 +16,6 @@ use tokio::sync::Mutex;
 
 use super::connect::{CONNECT_TIMEOUT, SshConnector, resolve_chain};
 use super::handler::StrictHostKey;
-use super::rsync;
 use super::transfer::{self, TransferStats};
 use crate::config::HostsConfig;
 
@@ -67,7 +66,7 @@ impl ConnectionPool {
     }
 
     /// Download a remote file or directory into `local_path`, replacing it if
-    /// it exists. Uses rsync when both ends have it, else a tar stream.
+    /// it already exists.
     pub async fn get_file(
         &self,
         config: &HostsConfig,
@@ -76,16 +75,12 @@ impl ConnectionPool {
         local_path: &Path,
         timeout: Duration,
     ) -> Result<TransferStats> {
-        if rsync::usable(self, config, host_alias).await {
-            return rsync::download(self, config, host_alias, remote_path, local_path, timeout)
-                .await;
-        }
         let channel = self.open_session(config, host_alias).await?;
         transfer::download(channel, remote_path, local_path, timeout).await
     }
 
     /// Upload a local file or directory to `remote_path`, replacing it if it
-    /// exists. Uses rsync when both ends have it, else a tar stream.
+    /// already exists.
     pub async fn put_file(
         &self,
         config: &HostsConfig,
@@ -94,9 +89,6 @@ impl ConnectionPool {
         remote_path: &str,
         timeout: Duration,
     ) -> Result<TransferStats> {
-        if rsync::usable(self, config, host_alias).await {
-            return rsync::upload(self, config, host_alias, local_path, remote_path, timeout).await;
-        }
         let channel = self.open_session(config, host_alias).await?;
         transfer::upload(channel, local_path, remote_path, timeout).await
     }

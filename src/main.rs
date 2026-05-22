@@ -22,15 +22,6 @@ enum Command {
     /// Run as a PreToolUse hook: a pure proxy that relays a policy query to
     /// the daemon.
     Hook,
-    /// Internal: rsync's transport, carried over russh. The daemon launches
-    /// this as rsync's remote shell; it is not meant for direct use.
-    #[command(hide = true)]
-    RshBridge {
-        /// The placeholder host token and the remote command, as rsync passes
-        /// them to a remote shell.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -39,6 +30,5 @@ fn main() -> anyhow::Result<()> {
         Command::Daemon => ssh_mcp::daemon::run(),
         Command::Serve => ssh_mcp::serve::run(),
         Command::Hook => ssh_mcp::hook::run(),
-        Command::RshBridge { args } => ssh_mcp::bridge::run(args),
     }
 }

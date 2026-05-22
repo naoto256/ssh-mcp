@@ -1,9 +1,7 @@
 //! Establishing russh connections, including multi-hop ProxyJump chains.
 //!
-//! The connection logic is shared by the pool — which caches one connection
-//! per host — and the rsync transport bridge, which opens a fresh connection
-//! of its own. Both build a connection from a resolved hop chain, so neither
-//! the pool nor the bridge needs to reach into the inventory while connecting.
+//! The pool builds a connection from a resolved hop chain, keeping the connect
+//! logic from reaching into the inventory itself.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,7 +11,6 @@ use anyhow::{Context, Result, bail};
 use russh::client;
 use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::AgentClient;
-use serde::{Deserialize, Serialize};
 
 use super::handler::StrictHostKey;
 use crate::config::{HostEntry, HostsConfig};
@@ -30,13 +27,10 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// notice a frozen peer (russh closes the connection after `keepalive_max`).
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// One hop's resolved connection parameters — enough to dial it without the
-/// inventory. The `alias` is carried only for error messages: a failure must
-/// never surface a hostname or an address to the model.
-///
-/// Serializable so the daemon can hand a resolved chain to the rsync bridge,
-/// keeping the daemon the only reader of the inventory file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One hop's resolved connection parameters. The `alias` is carried only for
+/// error messages: a failure must never surface a hostname or an address to
+/// the model.
+#[derive(Debug, Clone)]
 pub struct Hop {
     /// The inventory alias, used in error messages — never the hostname.
     pub alias: String,

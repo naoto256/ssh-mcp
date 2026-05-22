@@ -7,8 +7,7 @@
 //!     cargo test --test transfer_e2e -- --ignored
 //!
 //! The host must already be in `~/.ssh/known_hosts` and the SSH agent must
-//! hold a key it accepts. Each transfer takes the rsync path if both ends have
-//! `rsync`, and the tar path otherwise; these tests cover whichever applies.
+//! hold a key it accepts.
 
 use std::time::Duration;
 

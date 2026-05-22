@@ -247,7 +247,7 @@ fn unpack(archive: &Path, entry_name: &str, dest: &Path) -> Result<()> {
 
 /// Replace `dest` with `produced`, removing whatever is at `dest` first.
 /// Both paths must be on the same filesystem, so the move is a rename.
-pub(super) fn promote(produced: &Path, dest: &Path) -> Result<()> {
+fn promote(produced: &Path, dest: &Path) -> Result<()> {
     if dest.symlink_metadata().is_ok() {
         remove_path(dest).with_context(|| format!("replacing the existing {}", dest.display()))?;
     }
@@ -266,29 +266,9 @@ fn remove_path(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// The size of a file, or the total size of every file under a directory.
-pub(super) fn tree_size(path: &Path) -> u64 {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return 0;
-    };
-    if meta.is_file() {
-        return meta.len();
-    }
-    if meta.is_dir() {
-        let Ok(entries) = std::fs::read_dir(path) else {
-            return 0;
-        };
-        return entries
-            .flatten()
-            .map(|entry| tree_size(&entry.path()))
-            .sum();
-    }
-    0
-}
-
 /// The directory a local path sits in, treating a bare name as the current
 /// directory.
-pub(super) fn local_parent(path: &Path) -> &Path {
+fn local_parent(path: &Path) -> &Path {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -297,7 +277,7 @@ pub(super) fn local_parent(path: &Path) -> &Path {
 
 /// Split a remote path into the directory to `tar -C` into and the file name to
 /// archive within it.
-pub(super) fn split_remote(path: &str) -> Result<(String, String)> {
+fn split_remote(path: &str) -> Result<(String, String)> {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
         bail!("the remote path {path:?} is empty or the filesystem root");
@@ -314,7 +294,7 @@ pub(super) fn split_remote(path: &str) -> Result<(String, String)> {
 }
 
 /// Quote a string as a single POSIX shell word.
-pub(super) fn shell_quote(value: &str) -> String {
+fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
@@ -411,20 +391,5 @@ mod tests {
         std::fs::write(&dest, b"stale content").unwrap();
         unpack(&archive, "entry.txt", &dest).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"fresh content");
-    }
-
-    #[test]
-    fn tree_size_sums_files_and_directories() {
-        let dir = tempfile::tempdir().unwrap();
-        let tree = dir.path().join("tree");
-        std::fs::create_dir(&tree).unwrap();
-        std::fs::write(tree.join("a"), b"12345").unwrap();
-        std::fs::create_dir(tree.join("sub")).unwrap();
-        std::fs::write(tree.join("sub").join("b"), b"678").unwrap();
-        assert_eq!(tree_size(&tree), 8);
-
-        let file = dir.path().join("solo");
-        std::fs::write(&file, b"abcd").unwrap();
-        assert_eq!(tree_size(&file), 4);
     }
 }

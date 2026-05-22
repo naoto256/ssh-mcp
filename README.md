@@ -43,11 +43,10 @@ are owner-only, and the daemon checks each connection's peer credentials.
 A host's `policy` is a set of gates (`free`, `def`, `claude`, `hook`) composed
 strictest-wins. The daemon is the single reader of the inventory.
 
-For file transfer, ssh-mcp uses `rsync` when both ends have it — so only
-changed data crosses the wire — and falls back to a `tar` stream otherwise;
-both run over the same SSH connection. A transfer is gated on both paths it
-touches: the remote path by the host's policy, the local path by your own
-Claude Code file rules, whichever is stricter.
+File transfer streams a `tar` archive over the SSH connection, carrying files
+and directories alike. A transfer is gated on both paths it touches: the
+remote path by the host's policy, the local path by your own Claude Code file
+rules, whichever is stricter.
 
 ## Build
 
