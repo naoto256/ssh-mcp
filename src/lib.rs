@@ -8,3 +8,4 @@ pub mod config;
 pub mod hook;
 pub mod policy;
 pub mod serve;
+pub mod ssh;
