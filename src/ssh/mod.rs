@@ -4,5 +4,7 @@
 mod connect;
 mod handler;
 mod pool;
+mod transfer;
 
 pub use pool::{ConnectionPool, ExecOutput};
+pub use transfer::TransferStats;

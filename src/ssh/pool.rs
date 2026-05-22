@@ -6,6 +6,7 @@
 //! transparent.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use tokio::sync::Mutex;
 
 use super::connect::{CONNECT_TIMEOUT, SshConnector, resolve_chain};
 use super::handler::StrictHostKey;
+use super::transfer::{self, TransferStats};
 use crate::config::HostsConfig;
 
 /// How long to wait for a session channel to open before treating the pooled
@@ -59,19 +61,56 @@ impl ConnectionPool {
         command: &str,
         timeout: Duration,
     ) -> Result<ExecOutput> {
+        let mut channel = self.open_session(config, host_alias).await?;
+        run_command(&mut channel, command, timeout).await
+    }
+
+    /// Download a remote file or directory into `local_path`, via `tar`.
+    pub async fn get_file(
+        &self,
+        config: &HostsConfig,
+        host_alias: &str,
+        remote_path: &str,
+        local_path: &Path,
+        timeout: Duration,
+    ) -> Result<TransferStats> {
+        let channel = self.open_session(config, host_alias).await?;
+        transfer::download(channel, remote_path, local_path, timeout).await
+    }
+
+    /// Upload a local file or directory to `remote_path`, via `tar`.
+    pub async fn put_file(
+        &self,
+        config: &HostsConfig,
+        host_alias: &str,
+        local_path: &Path,
+        remote_path: &str,
+        timeout: Duration,
+    ) -> Result<TransferStats> {
+        let channel = self.open_session(config, host_alias).await?;
+        transfer::upload(channel, local_path, remote_path, timeout).await
+    }
+
+    /// Open a fresh channel on a host's pooled connection. A dead pooled
+    /// connection is detected when the channel fails to open or times out, and
+    /// is replaced once before retrying.
+    async fn open_session(
+        &self,
+        config: &HostsConfig,
+        host_alias: &str,
+    ) -> Result<Channel<client::Msg>> {
         let handle = self.get_or_connect(config, host_alias).await?;
-        let mut channel = match open_channel(&handle).await {
-            Ok(channel) => channel,
+        match open_channel(&handle).await {
+            Ok(channel) => Ok(channel),
             Err(_) => {
                 // The pooled connection looks dead; drop it and reconnect once.
                 self.evict(host_alias).await;
                 let handle = self.get_or_connect(config, host_alias).await?;
                 open_channel(&handle)
                     .await
-                    .context("failed to open a channel after reconnecting")?
+                    .context("failed to open a channel after reconnecting")
             }
-        };
-        run_command(&mut channel, command, timeout).await
+        }
     }
 
     async fn evict(&self, host_alias: &str) {
