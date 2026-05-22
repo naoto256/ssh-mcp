@@ -71,6 +71,10 @@ pub struct GetFileParams {
     pub remote_path: String,
     /// Where to place it locally — absolute, or starting with `~/`.
     pub local_path: String,
+    /// Optional glob patterns to skip; a pattern matches a file or directory
+    /// name anywhere in the tree, e.g. "target", ".git", "*.log".
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// Arguments to `put_file`.
@@ -83,6 +87,10 @@ pub struct PutFileParams {
     /// Where to place it on the host — absolute, or relative to the login
     /// directory, without a leading `~`.
     pub remote_path: String,
+    /// Optional glob patterns to skip; a pattern matches a file or directory
+    /// name anywhere in the tree, e.g. "target", ".git", "*.log".
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// The result of a transfer.
@@ -185,7 +193,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "get_file",
-        description = "Download a file or directory from a host to the local machine. remote_path is on the host (absolute, or relative to the login directory — no leading ~); local_path is where it lands locally (absolute, or starting with ~/) and is replaced if it already exists. Files and directories are both supported."
+        description = "Download a file or directory from a host to the local machine. remote_path is on the host (absolute, or relative to the login directory — no leading ~); local_path is where it lands locally (absolute, or starting with ~/) and is replaced if it already exists. Files and directories are both supported. Pass exclude (glob patterns matching a name anywhere in the tree, e.g. \"target\", \".git\") to skip entries."
     )]
     async fn get_file(
         &self,
@@ -195,6 +203,7 @@ impl SshMcpServer {
             host,
             remote_path,
             local_path,
+            exclude,
         } = params.0;
         let config = HostsConfig::load(&self.config_path).map_err(|e| format!("{e:#}"))?;
         let timeout = match config.host(&host) {
@@ -207,7 +216,7 @@ impl SshMcpServer {
 
         let result = self
             .pool
-            .get_file(&config, &host, &remote, &local, timeout)
+            .get_file(&config, &host, &remote, &local, &exclude, timeout)
             .await;
         let local_display = local.to_string_lossy();
         match &result {
@@ -238,7 +247,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "put_file",
-        description = "Upload a local file or directory to a host. local_path is the local source (absolute, or starting with ~/); remote_path is where it lands on the host (absolute, or relative to the login directory — no leading ~) and is replaced if it already exists. Files and directories are both supported."
+        description = "Upload a local file or directory to a host. local_path is the local source (absolute, or starting with ~/); remote_path is where it lands on the host (absolute, or relative to the login directory — no leading ~) and is replaced if it already exists. Files and directories are both supported. Pass exclude (glob patterns matching a name anywhere in the tree, e.g. \"target\", \".git\") to skip entries — useful to leave build output out of an upload."
     )]
     async fn put_file(
         &self,
@@ -248,6 +257,7 @@ impl SshMcpServer {
             host,
             local_path,
             remote_path,
+            exclude,
         } = params.0;
         let config = HostsConfig::load(&self.config_path).map_err(|e| format!("{e:#}"))?;
         let timeout = match config.host(&host) {
@@ -259,7 +269,7 @@ impl SshMcpServer {
 
         let result = self
             .pool
-            .put_file(&config, &host, &local, &remote, timeout)
+            .put_file(&config, &host, &local, &remote, &exclude, timeout)
             .await;
         let local_display = local.to_string_lossy();
         match &result {

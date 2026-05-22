@@ -7,6 +7,7 @@
 //! bytes throughout — never decoded as text — so binary content survives
 //! intact.
 
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -14,6 +15,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use russh::{Channel, ChannelMsg, client};
 use tar::{Archive, Builder};
 use tempfile::NamedTempFile;
@@ -33,11 +35,13 @@ struct RemoteResult {
 }
 
 /// Download a remote file or directory into `local_path` by streaming a tar
-/// archive over `channel`, replacing `local_path` if it already exists.
+/// archive over `channel`, replacing `local_path` if it already exists. An
+/// entry whose name matches an `exclude` glob is left out.
 pub async fn download(
     mut channel: Channel<client::Msg>,
     remote_path: &str,
     local_path: &Path,
+    exclude: &[String],
     timeout: Duration,
 ) -> Result<TransferStats> {
     let parent = local_parent(local_path);
@@ -48,12 +52,12 @@ pub async fn download(
     let (dir, base) = split_remote(remote_path)?;
     // `tar -C dir base` archives `base` relative to `dir`, so the archive's top
     // entry is exactly `base` regardless of how deep the remote path was. `-z`
-    // gzips the stream on the remote.
-    let command = format!(
-        "tar -cz -f - -C {} -- {}",
-        shell_quote(&dir),
-        shell_quote(&base)
-    );
+    // gzips the stream on the remote; each `--exclude` drops a matching name.
+    let mut command = format!("tar -cz -f - -C {}", shell_quote(&dir));
+    for pattern in exclude {
+        command.push_str(&format!(" --exclude={}", shell_quote(pattern)));
+    }
+    command.push_str(&format!(" -- {}", shell_quote(&base)));
 
     let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
     let mut sink =
@@ -75,23 +79,26 @@ pub async fn download(
 }
 
 /// Upload a local file or directory to `remote_path` by streaming a tar archive
-/// over `channel`. The remote parent directory is created if it is missing.
+/// over `channel`. The remote parent directory is created if it is missing. An
+/// entry whose name matches an `exclude` glob is left out.
 pub async fn upload(
     mut channel: Channel<client::Msg>,
     local_path: &Path,
     remote_path: &str,
+    exclude: &[String],
     timeout: Duration,
 ) -> Result<TransferStats> {
     if !local_path.exists() {
         bail!("the local path {} does not exist", local_path.display());
     }
+    let excludes = compile_excludes(exclude)?;
 
     let (dir, base) = split_remote(remote_path)?;
     let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
     let archive = tar_file.path().to_path_buf();
     let source = local_path.to_path_buf();
     let entry = base.clone();
-    tokio::task::spawn_blocking(move || pack(&source, &entry, &archive))
+    tokio::task::spawn_blocking(move || pack(&source, &entry, &archive, &excludes))
         .await
         .context("the archive creation task failed")??;
     let bytes = tar_file
@@ -206,9 +213,20 @@ fn check_remote(result: &RemoteResult) -> Result<()> {
     );
 }
 
+/// Compile exclude glob patterns into a set tested against each entry name.
+fn compile_excludes(patterns: &[String]) -> Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(
+            Glob::new(pattern).with_context(|| format!("invalid exclude pattern {pattern:?}"))?,
+        );
+    }
+    builder.build().context("building the exclude matcher")
+}
+
 /// Archive `source` (a file or directory) into the `archive` file, naming its
 /// top-level entry `entry_name`. Synchronous; run on a blocking task.
-fn pack(source: &Path, entry_name: &str, archive: &Path) -> Result<()> {
+fn pack(source: &Path, entry_name: &str, archive: &Path, excludes: &GlobSet) -> Result<()> {
     let file = std::fs::File::create(archive)
         .with_context(|| format!("creating {}", archive.display()))?;
     let mut builder = Builder::new(GzEncoder::new(file, Compression::default()));
@@ -217,9 +235,7 @@ fn pack(source: &Path, entry_name: &str, archive: &Path) -> Result<()> {
     let meta = std::fs::symlink_metadata(source)
         .with_context(|| format!("reading {}", source.display()))?;
     if meta.is_dir() {
-        builder
-            .append_dir_all(entry_name, source)
-            .with_context(|| format!("archiving the directory {}", source.display()))?;
+        append_tree(&mut builder, source, Path::new(entry_name), excludes)?;
     } else {
         builder
             .append_path_with_name(source, entry_name)
@@ -231,6 +247,39 @@ fn pack(source: &Path, entry_name: &str, archive: &Path) -> Result<()> {
         .context("finalising the archive")?
         .finish()
         .context("finalising the gzip stream")?;
+    Ok(())
+}
+
+/// Recursively archive `dir` under `archive_dir`, skipping any entry whose name
+/// matches an exclude glob — and not descending into an excluded directory.
+fn append_tree<W: Write>(
+    builder: &mut Builder<W>,
+    dir: &Path,
+    archive_dir: &Path,
+    excludes: &GlobSet,
+) -> Result<()> {
+    builder
+        .append_dir(archive_dir, dir)
+        .with_context(|| format!("archiving the directory {}", dir.display()))?;
+    let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading an entry of {}", dir.display()))?;
+        let name = entry.file_name();
+        if excludes.is_match(Path::new(&name)) {
+            continue;
+        }
+        let child = entry.path();
+        let archive_child = archive_dir.join(&name);
+        let meta = std::fs::symlink_metadata(&child)
+            .with_context(|| format!("reading {}", child.display()))?;
+        if meta.is_dir() {
+            append_tree(builder, &child, &archive_child, excludes)?;
+        } else {
+            builder
+                .append_path_with_name(&child, &archive_child)
+                .with_context(|| format!("archiving {}", child.display()))?;
+        }
+    }
     Ok(())
 }
 
@@ -347,7 +396,7 @@ mod tests {
         std::fs::write(&source, b"hello transfer").unwrap();
 
         let archive = dir.path().join("bundle.tar");
-        pack(&source, "renamed.txt", &archive).unwrap();
+        pack(&source, "renamed.txt", &archive, &GlobSet::empty()).unwrap();
 
         let dest = dir.path().join("result.txt");
         unpack(&archive, "renamed.txt", &dest).unwrap();
@@ -364,7 +413,7 @@ mod tests {
         std::fs::write(source.join("sub").join("b.txt"), b"bravo").unwrap();
 
         let archive = dir.path().join("bundle.tar");
-        pack(&source, "copied", &archive).unwrap();
+        pack(&source, "copied", &archive, &GlobSet::empty()).unwrap();
 
         let dest = dir.path().join("result");
         unpack(&archive, "copied", &dest).unwrap();
@@ -381,7 +430,7 @@ mod tests {
         let source = dir.path().join("original.txt");
         std::fs::write(&source, b"data").unwrap();
         let archive = dir.path().join("bundle.tar");
-        pack(&source, "present.txt", &archive).unwrap();
+        pack(&source, "present.txt", &archive, &GlobSet::empty()).unwrap();
 
         let dest = dir.path().join("result.txt");
         assert!(unpack(&archive, "absent.txt", &dest).is_err());
@@ -393,11 +442,32 @@ mod tests {
         let source = dir.path().join("original.txt");
         std::fs::write(&source, b"fresh content").unwrap();
         let archive = dir.path().join("bundle.tar");
-        pack(&source, "entry.txt", &archive).unwrap();
+        pack(&source, "entry.txt", &archive, &GlobSet::empty()).unwrap();
 
         let dest = dir.path().join("result.txt");
         std::fs::write(&dest, b"stale content").unwrap();
         unpack(&archive, "entry.txt", &dest).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"fresh content");
+    }
+
+    #[test]
+    fn pack_excludes_matching_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("project");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("keep.rs"), b"src").unwrap();
+        std::fs::write(source.join("debug.log"), b"log").unwrap();
+        std::fs::create_dir(source.join("target")).unwrap();
+        std::fs::write(source.join("target").join("big"), b"artifact").unwrap();
+
+        let excludes = compile_excludes(&["target".to_string(), "*.log".to_string()]).unwrap();
+        let archive = dir.path().join("bundle.tar");
+        pack(&source, "project", &archive, &excludes).unwrap();
+
+        let dest = dir.path().join("result");
+        unpack(&archive, "project", &dest).unwrap();
+        assert!(dest.join("keep.rs").exists());
+        assert!(!dest.join("debug.log").exists());
+        assert!(!dest.join("target").exists());
     }
 }

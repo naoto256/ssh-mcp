@@ -66,31 +66,33 @@ impl ConnectionPool {
     }
 
     /// Download a remote file or directory into `local_path`, replacing it if
-    /// it already exists.
+    /// it already exists. Entries matching an `exclude` glob are skipped.
     pub async fn get_file(
         &self,
         config: &HostsConfig,
         host_alias: &str,
         remote_path: &str,
         local_path: &Path,
+        exclude: &[String],
         timeout: Duration,
     ) -> Result<TransferStats> {
         let channel = self.open_session(config, host_alias).await?;
-        transfer::download(channel, remote_path, local_path, timeout).await
+        transfer::download(channel, remote_path, local_path, exclude, timeout).await
     }
 
     /// Upload a local file or directory to `remote_path`, replacing it if it
-    /// already exists.
+    /// already exists. Entries matching an `exclude` glob are skipped.
     pub async fn put_file(
         &self,
         config: &HostsConfig,
         host_alias: &str,
         local_path: &Path,
         remote_path: &str,
+        exclude: &[String],
         timeout: Duration,
     ) -> Result<TransferStats> {
         let channel = self.open_session(config, host_alias).await?;
-        transfer::upload(channel, local_path, remote_path, timeout).await
+        transfer::upload(channel, local_path, remote_path, exclude, timeout).await
     }
 
     /// Open a fresh channel on a host's pooled connection. A dead pooled
