@@ -1,11 +1,11 @@
-//! The `ssh-hosts.toml` schema and loader.
+//! The `ssh-mcp.toml` schema and loader.
 //!
 //! This file is the single source of truth for connection details, host
-//! purpose, and per-host policy. The server is its only reader.
+//! purpose, and per-host policy. The daemon is its only reader.
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::de::{self, Visitor};
@@ -153,7 +153,7 @@ pub struct HostsConfig {
 impl HostsConfig {
     /// Parse a config from a TOML string.
     pub fn parse(toml_str: &str) -> Result<Self> {
-        toml::from_str(toml_str).context("failed to parse ssh-hosts.toml")
+        toml::from_str(toml_str).context("failed to parse ssh-mcp.toml")
     }
 
     /// Read and parse the config from disk.
@@ -178,15 +178,6 @@ impl HostsConfig {
             .or(self.defaults.exec_timeout_secs)
             .unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS)
     }
-}
-
-/// The default config location: `~/.ssh/ssh-hosts.toml`.
-///
-/// Placing it under `~/.ssh/` lets an existing `Read(~/.ssh/**)` deny rule
-/// protect it for free.
-pub fn default_config_path() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".ssh").join("ssh-hosts.toml"))
 }
 
 #[cfg(test)]

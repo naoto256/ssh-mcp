@@ -1,8 +1,8 @@
-//! The MCP server: the stdio JSON-RPC service exposed by `serve`.
+//! The MCP server the daemon runs over each UDS connection.
 //!
 //! Two tools are offered. `list_hosts` shows the curated inventory — purpose
 //! and policy only, never an address or credentials. `exec` runs a command.
-//! Policy is not evaluated here: by the time a call reaches this server the
+//! Policy is not evaluated here: by the time a call reaches the daemon the
 //! hook has already approved it.
 
 use std::path::PathBuf;
@@ -13,13 +13,13 @@ use anyhow::{Context, Result};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
-use rmcp::transport::stdio;
 use rmcp::{Json, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::net::UnixStream;
 
 use crate::audit::AuditLog;
-use crate::config::{HostsConfig, default_config_path};
+use crate::config::HostsConfig;
 use crate::ssh::ConnectionPool;
 
 /// A host as shown to the model: what it is for and how it is gated, never
@@ -60,7 +60,8 @@ pub struct ExecResult {
     pub exit_code: i32,
 }
 
-/// The MCP server state, shared across tool calls.
+/// One MCP session's view of the daemon. Cheap to clone — it shares the
+/// daemon's connection pool and only adds a per-session tool router.
 #[derive(Clone)]
 pub struct SshMcpServer {
     pool: Arc<ConnectionPool>,
@@ -71,13 +72,27 @@ pub struct SshMcpServer {
 
 #[tool_router(router = tool_router)]
 impl SshMcpServer {
-    fn new(config_path: PathBuf, audit: AuditLog) -> Result<Self> {
-        Ok(Self {
-            pool: Arc::new(ConnectionPool::new()?),
+    /// Build a session that shares the daemon's connection pool and audit log.
+    pub fn new(pool: Arc<ConnectionPool>, config_path: PathBuf, audit: AuditLog) -> Self {
+        Self {
+            pool,
             config_path,
             audit,
             tool_router: Self::tool_router(),
-        })
+        }
+    }
+
+    /// Serve one MCP session over a connection until the client disconnects.
+    pub async fn serve_connection(self, stream: UnixStream) -> Result<()> {
+        let running = self
+            .serve(stream)
+            .await
+            .context("the MCP session handshake failed")?;
+        running
+            .waiting()
+            .await
+            .context("the MCP session ended with an error")?;
+        Ok(())
     }
 
     #[tool(
@@ -142,15 +157,4 @@ impl ServerHandler for SshMcpServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("ssh-mcp", env!("CARGO_PKG_VERSION")))
     }
-}
-
-/// Run the MCP server over stdio until the client disconnects.
-pub async fn run() -> Result<()> {
-    let server = SshMcpServer::new(default_config_path()?, AuditLog::at_default_location()?)?;
-    let service = server
-        .serve(stdio())
-        .await
-        .context("failed to start the MCP server")?;
-    service.waiting().await.context("the MCP server stopped")?;
-    Ok(())
 }

@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use super::Decision;
 use super::permission::PermissionSet;
-use crate::config::{Gate, HostsConfig, NamedGate, Permissions};
+use crate::config::{Gate, HostEntry, HostsConfig, NamedGate, Permissions};
 
 /// The subset of `~/.claude/settings.json` the `claude` gate needs.
 #[derive(Debug, Default, Deserialize)]
@@ -43,7 +43,9 @@ impl Evaluator {
         }
     }
 
-    /// Evaluate a command against a host's policy.
+    /// Evaluate a command against a host's policy, treating every `hook` gate
+    /// as abstaining. This is the offline path; the live server additionally
+    /// runs the hook gates returned by [`evaluate_rule_gates`].
     ///
     /// A host that is not in the config is denied: the model only learns of
     /// hosts through `list_hosts`, so an unknown alias is treated as hostile.
@@ -56,31 +58,35 @@ impl Evaluator {
         let Some(host) = config.host(host_alias) else {
             return Ok(Decision::Deny);
         };
-        self.evaluate_policy(&host.policy, host.def.as_ref(), command)
-    }
-
-    fn evaluate_policy(
-        &self,
-        gates: &[Gate],
-        def: Option<&Permissions>,
-        command: &str,
-    ) -> Result<Decision> {
         // An empty gate set is equivalent to `free`.
-        if gates.is_empty() {
+        if host.policy.is_empty() {
             return Ok(Decision::Allow);
         }
+        let rules = self.evaluate_rule_gates(host, command)?;
+        let mut decisions = rules.decisions;
+        decisions.extend(rules.hook_programs.iter().map(|_| Decision::Unset));
+        Ok(combine_gates(&decisions))
+    }
 
+    /// Evaluate the rule-based gates (`free`, `def`, `claude`) of a non-empty
+    /// host policy. Hook gates are not run here — they require spawning a
+    /// subprocess — so their program paths are returned for the caller.
+    ///
+    /// The caller handles the empty-policy and unknown-host cases, runs the
+    /// returned hook programs, and applies [`combine_gates`] to the full set.
+    pub fn evaluate_rule_gates(&self, host: &HostEntry, command: &str) -> Result<RuleGates> {
         // The `def` and `claude` gates share the Claude Code rule grammar, so
         // their rules are merged into one set and evaluated once.
         let mut merged = Permissions::default();
         let mut has_rule_gate = false;
         let mut decisions: Vec<Decision> = Vec::new();
+        let mut hook_programs: Vec<String> = Vec::new();
 
-        for gate in gates {
+        for gate in &host.policy {
             match gate {
                 Gate::Named(NamedGate::Free) => decisions.push(Decision::Allow),
                 Gate::Named(NamedGate::Def) => {
-                    if let Some(rules) = def {
+                    if let Some(rules) = host.def.as_ref() {
                         merged.merge_from(rules);
                     }
                     has_rule_gate = true;
@@ -89,10 +95,7 @@ impl Evaluator {
                     merged.merge_from(&self.load_claude_permissions()?);
                     has_rule_gate = true;
                 }
-                Gate::Hook { .. } => {
-                    // The hook gate is not yet wired up; it abstains for now.
-                    decisions.push(Decision::Unset);
-                }
+                Gate::Hook { hook } => hook_programs.push(hook.clone()),
             }
         }
 
@@ -101,7 +104,10 @@ impl Evaluator {
             decisions.push(set.evaluate_command(command));
         }
 
-        Ok(combine_gates(&decisions))
+        Ok(RuleGates {
+            decisions,
+            hook_programs,
+        })
     }
 
     fn load_claude_permissions(&self) -> Result<Permissions> {
@@ -120,9 +126,17 @@ impl Evaluator {
     }
 }
 
+/// The outcome of evaluating a host's rule-based gates: one decision per
+/// `free`/`def`/`claude` gate, plus the program path of each `hook` gate
+/// that still needs to be run.
+pub struct RuleGates {
+    pub decisions: Vec<Decision>,
+    pub hook_programs: Vec<String>,
+}
+
 /// Combine gate decisions: the strictest opinion wins, abstentions are
 /// ignored, and a policy where every gate abstains fails closed to `Deny`.
-fn combine_gates(decisions: &[Decision]) -> Decision {
+pub fn combine_gates(decisions: &[Decision]) -> Decision {
     let rank = |d: Decision| match d {
         Decision::Deny => 2,
         Decision::Ask => 1,

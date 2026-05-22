@@ -5,7 +5,7 @@ mod command;
 mod gate;
 mod permission;
 
-pub use gate::Evaluator;
+pub use gate::{Evaluator, RuleGates, combine_gates};
 pub use permission::{Permission, PermissionSet, Tool};
 
 /// The outcome of evaluating a command against a rule set or a host policy.

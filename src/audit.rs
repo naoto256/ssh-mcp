@@ -43,14 +43,6 @@ impl AuditLog {
         Self { path }
     }
 
-    /// The default audit log location, `~/.ssh/ssh-mcp-audit.jsonl`.
-    pub fn at_default_location() -> Result<Self> {
-        let home = std::env::var_os("HOME").context("HOME is not set")?;
-        Ok(Self::new(
-            PathBuf::from(home).join(".ssh").join("ssh-mcp-audit.jsonl"),
-        ))
-    }
-
     /// Record one exec. The command is masked before it is written. A logging
     /// failure must never break exec, so it is reported to stderr and dropped.
     pub fn record(&self, host: &str, command: &str, exit_code: Option<i32>, error: Option<&str>) {
