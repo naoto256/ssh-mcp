@@ -64,8 +64,10 @@ Three things need wiring (macOS with Claude Code).
 Describe your hosts in `~/.ssh/ssh-mcp.toml`:
 
 ```toml
+# Each exec has a time limit, 600s by default. Override it globally here, or
+# per host with an exec_timeout_secs key under [hosts.<alias>].
 [defaults]
-exec_timeout_secs = 120
+exec_timeout_secs = 600
 
 [hosts.build-rig]
 hostname = "10.0.5.12"
@@ -121,6 +123,12 @@ This writes the definition to `~/.claude.json`. For a single project, drop a
 `mcpServers` from `settings.json` — server definitions live only in
 `~/.claude.json` or `.mcp.json`.
 
+The harness applies its own per-call timeout to every MCP tool call. Make sure
+it is at least as long as the largest `exec_timeout_secs` in your inventory, so
+the daemon's own timeout fires first and returns a clean error instead of the
+harness cutting the call off. Set it with a `timeout` field (milliseconds) on
+the `ssh` entry in `~/.claude.json`.
+
 Then add the PreToolUse hook to `~/.claude/settings.json`:
 
 ```jsonc
@@ -142,6 +150,15 @@ Then add the PreToolUse hook to `~/.claude/settings.json`:
 - Protect the trust root by denying edits to it: add `Edit(~/.ssh/ssh-mcp.toml)`,
   `Edit(~/.ssh/ssh-mcp/**)`, `Edit(~/.claude/settings.json)`, `Edit(~/.claude.json)`,
   and the path of the `ssh-mcp` binary to `permissions.ask` (or `deny`).
+
+## Troubleshooting
+
+**`exec` fails with "no route to host" (`EHOSTUNREACH`) for a host on your
+LAN.** On macOS, a process that connects to private/LAN addresses needs Local
+Network permission, and a daemon started by launchd may not have been granted
+it. Grant it under System Settings → Privacy & Security → Local Network, then
+restart the daemon. A host on the public internet, or one reached only through
+a public-IP bastion, is not affected.
 
 ## Contributing
 
