@@ -108,13 +108,23 @@ the agent, set it in the plist's `EnvironmentVariables`.
 
 ### 3. Claude Code
 
-Add to `~/.claude/settings.json`:
+Two parts: register the MCP server, then wire the policy hook.
+
+Register the server at user scope (available in every project):
+
+```sh
+claude mcp add --scope user ssh <path>/ssh-mcp serve
+```
+
+This writes the definition to `~/.claude.json`. For a single project, drop a
+`.mcp.json` at the project root instead. Claude Code does **not** read
+`mcpServers` from `settings.json` — server definitions live only in
+`~/.claude.json` or `.mcp.json`.
+
+Then add the PreToolUse hook to `~/.claude/settings.json`:
 
 ```jsonc
 {
-  "mcpServers": {
-    "ssh": { "command": "<path>/ssh-mcp", "args": ["serve"] }
-  },
   "hooks": {
     "PreToolUse": [
       { "matcher": "mcp__ssh__exec",
@@ -130,8 +140,8 @@ Add to `~/.claude/settings.json`:
 - Keep `Bash(ssh *)` in `permissions.ask` so raw `ssh` from the `Bash` tool is
   not a bypass.
 - Protect the trust root by denying edits to it: add `Edit(~/.ssh/ssh-mcp.toml)`,
-  `Edit(~/.ssh/ssh-mcp/**)`, `Edit(~/.claude/settings.json)`, and the path of
-  the `ssh-mcp` binary to `permissions.ask` (or `deny`).
+  `Edit(~/.ssh/ssh-mcp/**)`, `Edit(~/.claude/settings.json)`, `Edit(~/.claude.json)`,
+  and the path of the `ssh-mcp` binary to `permissions.ask` (or `deny`).
 
 ## Contributing
 
