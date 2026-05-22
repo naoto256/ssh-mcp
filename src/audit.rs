@@ -1,4 +1,4 @@
-//! The audit log: one JSON line per policy decision and per command run.
+//! The audit log: one JSON line per policy decision, command run, and transfer.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -23,9 +23,9 @@ pub fn mask_secrets(command: &str) -> String {
         .into_owned()
 }
 
-/// One audit record. Policy decisions and executions are both logged, tagged
-/// by `event` so a reader can tell them apart and correlate them by host and
-/// command.
+/// One audit record. Policy decisions, command executions, and file transfers
+/// are all logged, tagged by `event` so a reader can tell them apart and
+/// correlate them by host.
 #[derive(Serialize)]
 #[serde(tag = "event", rename_all = "lowercase")]
 enum AuditEntry<'a> {
@@ -45,9 +45,19 @@ enum AuditEntry<'a> {
         exit_code: Option<i32>,
         error: Option<&'a str>,
     },
+    /// A file transfer and its outcome.
+    Transfer {
+        timestamp: String,
+        host: &'a str,
+        direction: &'a str,
+        remote_path: &'a str,
+        local_path: &'a str,
+        bytes: Option<u64>,
+        error: Option<&'a str>,
+    },
 }
 
-/// Appends decision and exec records to a JSONL file.
+/// Appends decision, exec, and transfer records to a JSONL file.
 #[derive(Clone)]
 pub struct AuditLog {
     path: PathBuf,
@@ -93,6 +103,27 @@ impl AuditLog {
         });
     }
 
+    /// Record one file transfer and its outcome.
+    pub fn record_transfer(
+        &self,
+        direction: &str,
+        host: &str,
+        remote_path: &str,
+        local_path: &str,
+        bytes: Option<u64>,
+        error: Option<&str>,
+    ) {
+        self.write(AuditEntry::Transfer {
+            timestamp: jiff::Timestamp::now().to_string(),
+            host,
+            direction,
+            remote_path,
+            local_path,
+            bytes,
+            error,
+        });
+    }
+
     /// Append one entry. A logging failure must never break a request, so it
     /// is reported to stderr and dropped.
     fn write(&self, entry: AuditEntry<'_>) {
@@ -129,6 +160,28 @@ mod tests {
             "DB_PASSWORD=*** psql"
         );
         assert_eq!(mask_secrets("API_KEY=xyz curl"), "API_KEY=*** curl");
+    }
+
+    #[test]
+    fn writes_a_transfer_entry() {
+        let path =
+            std::env::temp_dir().join(format!("ssh-mcp-audit-xfer-{}.jsonl", std::process::id()));
+        let log = AuditLog::new(path.clone());
+        log.record_transfer(
+            "get",
+            "build-rig",
+            "/remote/f",
+            "/local/f",
+            Some(2048),
+            None,
+        );
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("\"event\":\"transfer\""));
+        assert!(contents.contains("\"direction\":\"get\""));
+        assert!(contents.contains("\"bytes\":2048"));
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

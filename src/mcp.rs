@@ -20,6 +20,7 @@ use tokio::net::UnixStream;
 
 use crate::audit::AuditLog;
 use crate::config::HostsConfig;
+use crate::pathnorm;
 use crate::ssh::ConnectionPool;
 
 /// A host as shown to the model: what it is for and how it is gated, never
@@ -58,6 +59,37 @@ pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+}
+
+/// Arguments to `get_file`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetFileParams {
+    /// The host alias, as returned by `list_hosts`.
+    pub host: String,
+    /// The path on the host to download — absolute, or relative to the login
+    /// directory, without a leading `~`.
+    pub remote_path: String,
+    /// Where to place it locally — absolute, or starting with `~/`.
+    pub local_path: String,
+}
+
+/// Arguments to `put_file`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PutFileParams {
+    /// The host alias, as returned by `list_hosts`.
+    pub host: String,
+    /// The local path to upload — absolute, or starting with `~/`.
+    pub local_path: String,
+    /// Where to place it on the host — absolute, or relative to the login
+    /// directory, without a leading `~`.
+    pub remote_path: String,
+}
+
+/// The result of a transfer.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct TransferResult {
+    /// The number of bytes transferred.
+    pub bytes: u64,
 }
 
 /// One MCP session's view of the daemon. Cheap to clone — it shares the
@@ -149,6 +181,111 @@ impl SshMcpServer {
             stderr: output.stderr,
             exit_code: output.exit_code,
         }))
+    }
+
+    #[tool(
+        name = "get_file",
+        description = "Download a file or directory from a host to the local machine. remote_path is on the host (absolute, or relative to the login directory — no leading ~); local_path is where it lands locally (absolute, or starting with ~/) and is replaced if it already exists. Files and directories are both supported."
+    )]
+    async fn get_file(
+        &self,
+        params: Parameters<GetFileParams>,
+    ) -> Result<Json<TransferResult>, String> {
+        let GetFileParams {
+            host,
+            remote_path,
+            local_path,
+        } = params.0;
+        let config = HostsConfig::load(&self.config_path).map_err(|e| format!("{e:#}"))?;
+        let timeout = match config.host(&host) {
+            Some(entry) => Duration::from_secs(config.exec_timeout_secs(entry)),
+            None => return Err(format!("unknown host {host:?}")),
+        };
+        // Normalize exactly as the policy gate did, so the two cannot disagree.
+        let remote = pathnorm::normalize_remote(&remote_path).map_err(|e| format!("{e:#}"))?;
+        let local = pathnorm::normalize_local(&local_path).map_err(|e| format!("{e:#}"))?;
+
+        let result = self
+            .pool
+            .get_file(&config, &host, &remote, &local, timeout)
+            .await;
+        let local_display = local.to_string_lossy();
+        match &result {
+            Ok(stats) => self.audit.record_transfer(
+                "get",
+                &host,
+                &remote,
+                &local_display,
+                Some(stats.bytes),
+                None,
+            ),
+            Err(error) => {
+                let message = format!("{error:#}");
+                self.audit.record_transfer(
+                    "get",
+                    &host,
+                    &remote,
+                    &local_display,
+                    None,
+                    Some(&message),
+                );
+            }
+        }
+
+        let stats = result.map_err(|e| format!("{e:#}"))?;
+        Ok(Json(TransferResult { bytes: stats.bytes }))
+    }
+
+    #[tool(
+        name = "put_file",
+        description = "Upload a local file or directory to a host. local_path is the local source (absolute, or starting with ~/); remote_path is where it lands on the host (absolute, or relative to the login directory — no leading ~) and is replaced if it already exists. Files and directories are both supported."
+    )]
+    async fn put_file(
+        &self,
+        params: Parameters<PutFileParams>,
+    ) -> Result<Json<TransferResult>, String> {
+        let PutFileParams {
+            host,
+            local_path,
+            remote_path,
+        } = params.0;
+        let config = HostsConfig::load(&self.config_path).map_err(|e| format!("{e:#}"))?;
+        let timeout = match config.host(&host) {
+            Some(entry) => Duration::from_secs(config.exec_timeout_secs(entry)),
+            None => return Err(format!("unknown host {host:?}")),
+        };
+        let remote = pathnorm::normalize_remote(&remote_path).map_err(|e| format!("{e:#}"))?;
+        let local = pathnorm::normalize_local(&local_path).map_err(|e| format!("{e:#}"))?;
+
+        let result = self
+            .pool
+            .put_file(&config, &host, &local, &remote, timeout)
+            .await;
+        let local_display = local.to_string_lossy();
+        match &result {
+            Ok(stats) => self.audit.record_transfer(
+                "put",
+                &host,
+                &remote,
+                &local_display,
+                Some(stats.bytes),
+                None,
+            ),
+            Err(error) => {
+                let message = format!("{error:#}");
+                self.audit.record_transfer(
+                    "put",
+                    &host,
+                    &remote,
+                    &local_display,
+                    None,
+                    Some(&message),
+                );
+            }
+        }
+
+        let stats = result.map_err(|e| format!("{e:#}"))?;
+        Ok(Json(TransferResult { bytes: stats.bytes }))
     }
 }
 
