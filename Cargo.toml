@@ -16,6 +16,9 @@ regex = "1.12.3"
 globset = "0.4.18"
 russh = "0.61.0"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "io-util", "net", "time", "process"] }
+rmcp = { version = "1.7.0", features = ["server", "transport-io", "macros", "schemars"] }
+schemars = "1.2.1"
+jiff = "0.2.24"
 
 [profile.release]
 strip = true

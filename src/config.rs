@@ -62,6 +62,19 @@ pub enum Gate {
     },
 }
 
+impl Gate {
+    /// The gate's kind as a short string, for display in `list_hosts`. The
+    /// `hook` gate's program path is intentionally not exposed.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Gate::Named(NamedGate::Free) => "free",
+            Gate::Named(NamedGate::Def) => "def",
+            Gate::Named(NamedGate::Claude) => "claude",
+            Gate::Hook { .. } => "hook",
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for Gate {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
