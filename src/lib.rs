@@ -1,0 +1,8 @@
+//! Policy-gated SSH execution MCP server.
+//!
+//! Enforcement lives outside the model: the model only picks a host and a
+//! command; whether that command runs is decided by the hook proxy and the
+//! server's policy evaluator.
+
+pub mod hook;
+pub mod serve;

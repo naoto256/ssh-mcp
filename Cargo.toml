@@ -1,0 +1,13 @@
+[package]
+name = "ssh-mcp"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Policy-gated SSH execution MCP server for Claude Code"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+[profile.release]
+strip = true
