@@ -122,6 +122,8 @@ impl<'de> Deserialize<'de> for Gate {
 pub struct HostEntry {
     pub hostname: String,
     pub user: Option<String>,
+    /// The SSH port; absent means the default, 22.
+    pub port: Option<u16>,
     /// Aliases of the jump hosts to route through, nearest hop first.
     #[serde(default)]
     pub proxy_jump: Vec<String>,

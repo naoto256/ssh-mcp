@@ -9,6 +9,7 @@ pub mod config;
 pub mod control;
 pub mod daemon;
 pub mod hook;
+pub mod import;
 pub mod mcp;
 pub mod paths;
 pub mod policy;

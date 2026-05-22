@@ -19,8 +19,8 @@ use tokio::sync::Mutex;
 use super::handler::StrictHostKey;
 use crate::config::{HostEntry, HostsConfig};
 
-/// SSH listens here; the inventory has no per-host port override yet.
-const SSH_PORT: u16 = 22;
+/// The SSH port used when a host does not specify one.
+const DEFAULT_SSH_PORT: u16 = 22;
 
 /// The result of running one remote command.
 #[derive(Debug, Clone)]
@@ -110,10 +110,11 @@ impl ConnectionPool {
 
         // The first hop is reached by a direct TCP connection.
         let first = resolve(config, hops[0])?;
+        let first_port = port_of(first);
         let mut handle = client::connect(
             self.config.clone(),
-            (first.hostname.as_str(), SSH_PORT),
-            self.host_key_handler(&first.hostname),
+            (first.hostname.as_str(), first_port),
+            self.host_key_handler(&first.hostname, first_port),
         )
         .await
         .with_context(|| format!("failed to connect to {:?}", hops[0]))?;
@@ -122,10 +123,11 @@ impl ConnectionPool {
         // Each later hop is tunneled through the connection before it.
         for &alias in &hops[1..] {
             let hop = resolve(config, alias)?;
+            let hop_port = port_of(hop);
             let tunnel = handle
                 .channel_open_direct_tcpip(
                     hop.hostname.clone(),
-                    u32::from(SSH_PORT),
+                    u32::from(hop_port),
                     "127.0.0.1",
                     0,
                 )
@@ -134,7 +136,7 @@ impl ConnectionPool {
             let mut next = client::connect_stream(
                 self.config.clone(),
                 tunnel.into_stream(),
-                self.host_key_handler(&hop.hostname),
+                self.host_key_handler(&hop.hostname, hop_port),
             )
             .await
             .with_context(|| format!("SSH handshake with {alias:?} failed"))?;
@@ -144,8 +146,8 @@ impl ConnectionPool {
         Ok(handle)
     }
 
-    fn host_key_handler(&self, hostname: &str) -> StrictHostKey {
-        StrictHostKey::new(hostname, SSH_PORT, self.known_hosts.clone())
+    fn host_key_handler(&self, hostname: &str, port: u16) -> StrictHostKey {
+        StrictHostKey::new(hostname, port, self.known_hosts.clone())
     }
 }
 
@@ -153,6 +155,11 @@ fn resolve<'a>(config: &'a HostsConfig, alias: &str) -> Result<&'a HostEntry> {
     config
         .host(alias)
         .with_context(|| format!("host {alias:?} is not in the inventory"))
+}
+
+/// The SSH port for a host: its configured port, else the default.
+fn port_of(host: &HostEntry) -> u16 {
+    host.port.unwrap_or(DEFAULT_SSH_PORT)
 }
 
 /// The login user for a host: its configured user, else `$USER`.
