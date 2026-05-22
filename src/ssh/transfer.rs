@@ -31,19 +31,13 @@ struct RemoteResult {
 }
 
 /// Download a remote file or directory into `local_path` by streaming a tar
-/// archive over `channel`. `local_path` must not already exist.
+/// archive over `channel`, replacing `local_path` if it already exists.
 pub async fn download(
     mut channel: Channel<client::Msg>,
     remote_path: &str,
     local_path: &Path,
     timeout: Duration,
 ) -> Result<TransferStats> {
-    if local_path.exists() {
-        bail!(
-            "the local path {} already exists; refusing to overwrite it",
-            local_path.display()
-        );
-    }
     let parent = local_parent(local_path);
     if !parent.is_dir() {
         bail!("the local directory {} does not exist", parent.display());
@@ -248,14 +242,53 @@ fn unpack(archive: &Path, entry_name: &str, dest: &Path) -> Result<()> {
     if !extracted.exists() {
         bail!("the archive did not contain the expected entry {entry_name:?}");
     }
-    std::fs::rename(&extracted, dest)
+    promote(&extracted, dest)
+}
+
+/// Replace `dest` with `produced`, removing whatever is at `dest` first.
+/// Both paths must be on the same filesystem, so the move is a rename.
+pub(super) fn promote(produced: &Path, dest: &Path) -> Result<()> {
+    if dest.symlink_metadata().is_ok() {
+        remove_path(dest).with_context(|| format!("replacing the existing {}", dest.display()))?;
+    }
+    std::fs::rename(produced, dest)
         .with_context(|| format!("moving the result into place at {}", dest.display()))?;
     Ok(())
 }
 
+/// Remove a file, directory, or symlink, without following symlinks.
+fn remove_path(path: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+/// The size of a file, or the total size of every file under a directory.
+pub(super) fn tree_size(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if meta.is_file() {
+        return meta.len();
+    }
+    if meta.is_dir() {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return 0;
+        };
+        return entries
+            .flatten()
+            .map(|entry| tree_size(&entry.path()))
+            .sum();
+    }
+    0
+}
+
 /// The directory a local path sits in, treating a bare name as the current
 /// directory.
-fn local_parent(path: &Path) -> &Path {
+pub(super) fn local_parent(path: &Path) -> &Path {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -264,7 +297,7 @@ fn local_parent(path: &Path) -> &Path {
 
 /// Split a remote path into the directory to `tar -C` into and the file name to
 /// archive within it.
-fn split_remote(path: &str) -> Result<(String, String)> {
+pub(super) fn split_remote(path: &str) -> Result<(String, String)> {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
         bail!("the remote path {path:?} is empty or the filesystem root");
@@ -281,7 +314,7 @@ fn split_remote(path: &str) -> Result<(String, String)> {
 }
 
 /// Quote a string as a single POSIX shell word.
-fn shell_quote(value: &str) -> String {
+pub(super) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
@@ -364,5 +397,34 @@ mod tests {
 
         let dest = dir.path().join("result.txt");
         assert!(unpack(&archive, "absent.txt", &dest).is_err());
+    }
+
+    #[test]
+    fn unpack_replaces_an_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("original.txt");
+        std::fs::write(&source, b"fresh content").unwrap();
+        let archive = dir.path().join("bundle.tar");
+        pack(&source, "entry.txt", &archive).unwrap();
+
+        let dest = dir.path().join("result.txt");
+        std::fs::write(&dest, b"stale content").unwrap();
+        unpack(&archive, "entry.txt", &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"fresh content");
+    }
+
+    #[test]
+    fn tree_size_sums_files_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::write(tree.join("a"), b"12345").unwrap();
+        std::fs::create_dir(tree.join("sub")).unwrap();
+        std::fs::write(tree.join("sub").join("b"), b"678").unwrap();
+        assert_eq!(tree_size(&tree), 8);
+
+        let file = dir.path().join("solo");
+        std::fs::write(&file, b"abcd").unwrap();
+        assert_eq!(tree_size(&file), 4);
     }
 }

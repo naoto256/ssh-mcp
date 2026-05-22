@@ -4,7 +4,9 @@
 mod connect;
 mod handler;
 mod pool;
+mod rsync;
 mod transfer;
 
+pub use connect::{Hop, SshConnector};
 pub use pool::{ConnectionPool, ExecOutput};
 pub use transfer::TransferStats;
