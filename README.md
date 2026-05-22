@@ -18,7 +18,8 @@ re-explained every session.
 `ssh-mcp` moves SSH execution off the `Bash` tool onto a structured MCP tool.
 The model reads the inventory itself via `list_hosts`, picks a host, and calls
 `exec`. A per-host policy decides — without a prompt for free hosts, with one
-for gated hosts.
+for gated hosts. `get_file` and `put_file` move files and directories the same
+way, under the same policy.
 
 ## Design
 
@@ -41,6 +42,12 @@ are owner-only, and the daemon checks each connection's peer credentials.
 
 A host's `policy` is a set of gates (`free`, `def`, `claude`, `hook`) composed
 strictest-wins. The daemon is the single reader of the inventory.
+
+For file transfer, ssh-mcp uses `rsync` when both ends have it — so only
+changed data crosses the wire — and falls back to a `tar` stream otherwise;
+both run over the same SSH connection. A transfer is gated on both paths it
+touches: the remote path by the host's policy, the local path by your own
+Claude Code file rules, whichever is stricter.
 
 ## Build
 
@@ -135,14 +142,16 @@ Then add the PreToolUse hook to `~/.claude/settings.json`:
 {
   "hooks": {
     "PreToolUse": [
-      { "matcher": "mcp__ssh__exec",
+      { "matcher": "mcp__ssh__(exec|get_file|put_file)",
         "hooks": [ { "type": "command", "command": "<path>/ssh-mcp hook" } ] }
     ]
   }
 }
 ```
 
-- Do **not** put `mcp__ssh__exec` in any `permissions` list. The hook is the
+- The matcher covers `exec`, `get_file`, and `put_file` — every tool that acts
+  on a host. `list_hosts` is read-only and ungated.
+- Do **not** put those tool names in any `permissions` list. The hook is the
   only policy gate; a native `ask` rule would fire even when the hook allows,
   so free hosts would still be prompted.
 - Keep `Bash(ssh *)` in `permissions.ask` so raw `ssh` from the `Bash` tool is
