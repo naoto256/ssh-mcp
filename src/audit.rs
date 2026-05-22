@@ -1,4 +1,4 @@
-//! The exec audit log: one JSON line per command run.
+//! The audit log: one JSON line per policy decision and per command run.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -23,16 +23,31 @@ pub fn mask_secrets(command: &str) -> String {
         .into_owned()
 }
 
+/// One audit record. Policy decisions and executions are both logged, tagged
+/// by `event` so a reader can tell them apart and correlate them by host and
+/// command.
 #[derive(Serialize)]
-struct AuditEntry<'a> {
-    timestamp: String,
-    host: &'a str,
-    command: String,
-    exit_code: Option<i32>,
-    error: Option<&'a str>,
+#[serde(tag = "event", rename_all = "lowercase")]
+enum AuditEntry<'a> {
+    /// A policy decision the daemon returned to a hook query.
+    Decision {
+        timestamp: String,
+        host: &'a str,
+        command: String,
+        permission_mode: &'a str,
+        decision: &'a str,
+    },
+    /// A command that was run and its outcome.
+    Exec {
+        timestamp: String,
+        host: &'a str,
+        command: String,
+        exit_code: Option<i32>,
+        error: Option<&'a str>,
+    },
 }
 
-/// Appends exec records to a JSONL file.
+/// Appends decision and exec records to a JSONL file.
 #[derive(Clone)]
 pub struct AuditLog {
     path: PathBuf,
@@ -43,16 +58,38 @@ impl AuditLog {
         Self { path }
     }
 
-    /// Record one exec. The command is masked before it is written. A logging
-    /// failure must never break exec, so it is reported to stderr and dropped.
-    pub fn record(&self, host: &str, command: &str, exit_code: Option<i32>, error: Option<&str>) {
-        let entry = AuditEntry {
+    /// Record a policy decision, including the permission mode it was made
+    /// under. The command is masked before it is written.
+    pub fn record_decision(&self, host: &str, command: &str, permission_mode: &str, decision: &str) {
+        self.write(AuditEntry::Decision {
+            timestamp: jiff::Timestamp::now().to_string(),
+            host,
+            command: mask_secrets(command),
+            permission_mode,
+            decision,
+        });
+    }
+
+    /// Record one exec and its outcome. The command is masked before writing.
+    pub fn record_exec(
+        &self,
+        host: &str,
+        command: &str,
+        exit_code: Option<i32>,
+        error: Option<&str>,
+    ) {
+        self.write(AuditEntry::Exec {
             timestamp: jiff::Timestamp::now().to_string(),
             host,
             command: mask_secrets(command),
             exit_code,
             error,
-        };
+        });
+    }
+
+    /// Append one entry. A logging failure must never break a request, so it
+    /// is reported to stderr and dropped.
+    fn write(&self, entry: AuditEntry<'_>) {
         if let Err(e) = self.append(&entry) {
             eprintln!("ssh-mcp: could not write the audit log: {e:#}");
         }
@@ -95,14 +132,22 @@ mod tests {
     }
 
     #[test]
-    fn writes_a_jsonl_line() {
+    fn writes_tagged_jsonl_lines() {
         let path = std::env::temp_dir().join(format!("ssh-mcp-audit-{}.jsonl", std::process::id()));
         let log = AuditLog::new(path.clone());
-        log.record("build-rig", "TOKEN=secret echo hi", Some(0), None);
+        log.record_exec("build-rig", "TOKEN=secret echo hi", Some(0), None);
+        log.record_decision("prod-db", "rm -rf /", "default", "deny");
+
         let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("\"event\":\"exec\""));
+        assert!(contents.contains("\"event\":\"decision\""));
         assert!(contents.contains("\"host\":\"build-rig\""));
+        assert!(contents.contains("\"permission_mode\":\"default\""));
+        assert!(contents.contains("\"decision\":\"deny\""));
+        // The secret value is masked in both record kinds.
         assert!(contents.contains("TOKEN=***"));
         assert!(!contents.contains("secret"));
+
         std::fs::remove_file(&path).ok();
     }
 }

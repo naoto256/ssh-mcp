@@ -14,13 +14,16 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
+use crate::audit::AuditLog;
 use crate::config::HostsConfig;
 use crate::policy::{Decision, Evaluator, combine_gates};
 
-/// The PreToolUse request the hook forwards, of which only the tool input
-/// matters here.
+/// The PreToolUse request the hook forwards: the tool input, plus the session's
+/// permission mode, which sets the no-match fallback.
 #[derive(Deserialize)]
 struct PreToolUseRequest {
+    #[serde(default, alias = "permissionMode")]
+    permission_mode: Option<String>,
     #[serde(default)]
     tool_input: ToolInput,
 }
@@ -33,8 +36,13 @@ struct ToolInput {
 
 /// Handle one control-socket connection. This never panics and always writes a
 /// decision: any failure is reported to stderr and answered with `deny`.
-pub async fn handle_connection(mut stream: UnixStream, config_path: &Path, evaluator: &Evaluator) {
-    let (decision, reason) = match process(&mut stream, config_path, evaluator).await {
+pub async fn handle_connection(
+    mut stream: UnixStream,
+    config_path: &Path,
+    evaluator: &Evaluator,
+    audit: &AuditLog,
+) {
+    let (decision, reason) = match process(&mut stream, config_path, evaluator, audit).await {
         Ok((host, decision)) => (decision, format!("ssh-mcp policy for host {host:?}")),
         Err(e) => {
             eprintln!("ssh-mcp: control request failed, denying: {e:#}");
@@ -49,11 +57,12 @@ pub async fn handle_connection(mut stream: UnixStream, config_path: &Path, evalu
     let _ = stream.shutdown().await;
 }
 
-/// Read a request, evaluate it, and return the host alias and decision.
+/// Read a request, evaluate it, record it, and return the host and decision.
 async fn process(
     stream: &mut UnixStream,
     config_path: &Path,
     evaluator: &Evaluator,
+    audit: &AuditLog,
 ) -> Result<(String, Decision)> {
     let mut raw = String::new();
     stream
@@ -63,6 +72,10 @@ async fn process(
 
     let request: PreToolUseRequest =
         serde_json::from_str(&raw).context("parsing the PreToolUse request")?;
+    let mode = request
+        .permission_mode
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
     let host = request
         .tool_input
         .host
@@ -73,18 +86,52 @@ async fn process(
         .context("the request carries no command")?;
 
     let config = HostsConfig::load(config_path).context("loading the host inventory")?;
-    let decision = decide(evaluator, &config, &host, &command, &raw).await;
+    let decision = decide(
+        evaluator,
+        &config,
+        &host,
+        &command,
+        &raw,
+        fallback_for_mode(&mode),
+    )
+    .await;
+
+    audit.record_decision(&host, &command, &mode, decision_label(decision));
     Ok((host, decision))
 }
 
+/// The no-match fallback for a permission mode. Claude Code's `default` mode
+/// prompts on an unmatched tool; `bypassPermissions` auto-approves it. Any
+/// other mode, or an absent value, prompts — the safe default.
+fn fallback_for_mode(mode: &str) -> Decision {
+    match mode {
+        "bypassPermissions" => Decision::Allow,
+        _ => Decision::Ask,
+    }
+}
+
+/// The audit-log label for a decision. Distinct from [`hook_output`]'s wire
+/// mapping, which folds the impossible `Unset` into `deny`; the log records
+/// the decision as-is.
+fn decision_label(decision: Decision) -> &'static str {
+    match decision {
+        Decision::Allow => "allow",
+        Decision::Ask => "ask",
+        Decision::Deny => "deny",
+        Decision::Unset => "unset",
+    }
+}
+
 /// Compose a host's full policy decision: the rule-based gates plus every
-/// `hook` gate, combined strictest-wins.
+/// `hook` gate, combined strictest-wins. `fallback` is the no-match outcome
+/// for the request's permission mode.
 async fn decide(
     evaluator: &Evaluator,
     config: &HostsConfig,
     host: &str,
     command: &str,
     raw_request: &str,
+    fallback: Decision,
 ) -> Decision {
     let Some(host_entry) = config.host(host) else {
         // The model only learns of hosts through `list_hosts`.
@@ -107,7 +154,7 @@ async fn decide(
     for program in &rule_gates.hook_programs {
         decisions.push(run_subhook(program, raw_request).await);
     }
-    combine_gates(&decisions)
+    combine_gates(&decisions, fallback)
 }
 
 /// Run one `hook` gate. A gate that cannot be evaluated fails closed.

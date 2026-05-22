@@ -135,10 +135,10 @@ impl SshMcpServer {
         match &result {
             Ok(output) => self
                 .audit
-                .record(&host, &command, Some(output.exit_code), None),
+                .record_exec(&host, &command, Some(output.exit_code), None),
             Err(error) => {
                 let message = format!("{error:#}");
-                self.audit.record(&host, &command, None, Some(&message));
+                self.audit.record_exec(&host, &command, None, Some(&message));
             }
         }
 

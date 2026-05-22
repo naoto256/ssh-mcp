@@ -47,6 +47,10 @@ impl Evaluator {
     /// as abstaining. This is the offline path; the live server additionally
     /// runs the hook gates returned by [`evaluate_rule_gates`].
     ///
+    /// When no gate has an opinion the result is `Ask` — the fallback of
+    /// Claude Code's `default` permission mode. The live server picks the
+    /// fallback from the request's actual mode.
+    ///
     /// A host that is not in the config is denied: the model only learns of
     /// hosts through `list_hosts`, so an unknown alias is treated as hostile.
     pub fn evaluate(
@@ -65,7 +69,7 @@ impl Evaluator {
         let rules = self.evaluate_rule_gates(host, command)?;
         let mut decisions = rules.decisions;
         decisions.extend(rules.hook_programs.iter().map(|_| Decision::Unset));
-        Ok(combine_gates(&decisions))
+        Ok(combine_gates(&decisions, Decision::Ask))
     }
 
     /// Evaluate the rule-based gates (`free`, `def`, `claude`) of a non-empty
@@ -135,8 +139,13 @@ pub struct RuleGates {
 }
 
 /// Combine gate decisions: the strictest opinion wins, abstentions are
-/// ignored, and a policy where every gate abstains fails closed to `Deny`.
-pub fn combine_gates(decisions: &[Decision]) -> Decision {
+/// ignored, and a policy where every gate abstains resolves to `fallback`.
+///
+/// `fallback` is the no-match outcome of the caller's permission mode — `Ask`
+/// for `default` mode, `Allow` for `bypassPermissions`. A genuine error path
+/// (an unreachable daemon, a failed evaluation) is denied by the caller before
+/// reaching here, not folded into this fallback.
+pub fn combine_gates(decisions: &[Decision], fallback: Decision) -> Decision {
     let rank = |d: Decision| match d {
         Decision::Deny => 2,
         Decision::Ask => 1,
@@ -148,7 +157,7 @@ pub fn combine_gates(decisions: &[Decision]) -> Decision {
         .copied()
         .filter(|d| *d != Decision::Unset)
         .max_by_key(|d| rank(*d))
-        .unwrap_or(Decision::Deny)
+        .unwrap_or(fallback)
 }
 
 #[cfg(test)]
@@ -215,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn def_gate_with_no_matching_rule_fails_closed() {
+    fn def_gate_with_no_matching_rule_falls_back_to_ask() {
         let cfg = config(
             r#"
             [hosts.staging]
@@ -226,9 +235,11 @@ mod tests {
             allow = ["Bash(ls:*)"]
         "#,
         );
+        // No rule matches `whoami`; the offline path uses the default-mode
+        // fallback, `Ask`.
         assert_eq!(
             evaluator().evaluate(&cfg, "staging", "whoami").unwrap(),
-            Decision::Deny
+            Decision::Ask
         );
     }
 
@@ -252,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn hook_only_policy_fails_closed_while_stubbed() {
+    fn hook_only_policy_abstains_to_ask_while_stubbed() {
         let cfg = config(
             r#"
             [hosts.gated]
@@ -261,9 +272,11 @@ mod tests {
             policy   = [{ hook = "~/hook.py" }]
         "#,
         );
+        // Offline, the hook gate abstains; with no other gate the offline
+        // path resolves to the default-mode fallback, `Ask`.
         assert_eq!(
             evaluator().evaluate(&cfg, "gated", "ls").unwrap(),
-            Decision::Deny
+            Decision::Ask
         );
     }
 

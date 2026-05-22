@@ -196,7 +196,7 @@ fn gate_composition_merges_def_and_claude_then_takes_the_strictest() {
     );
     assert_eq!(
         evaluator.evaluate(&config, "api", "uptime").unwrap(),
-        Decision::Deny // no rule matched: fail closed
+        Decision::Ask // no rule matched: offline path falls back to ask
     );
 }
 
