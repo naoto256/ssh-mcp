@@ -4,5 +4,7 @@
 //! command; whether that command runs is decided by the hook proxy and the
 //! server's policy evaluator.
 
+pub mod config;
 pub mod hook;
+pub mod policy;
 pub mod serve;
