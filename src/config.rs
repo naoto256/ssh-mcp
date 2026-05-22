@@ -135,6 +135,10 @@ pub struct HostEntry {
     /// The unordered set of gates applied to this host.
     pub policy: Vec<Gate>,
     pub exec_timeout_secs: Option<u64>,
+    /// Glob patterns `get_file` skips when downloading from this host — the
+    /// remote tree is host-specific, so the download exclude is per-host.
+    #[serde(default)]
+    pub exclude: Vec<String>,
     /// Inline rules consumed by the `def` gate, from `[hosts.<alias>.def]`.
     pub def: Option<Permissions>,
 }
@@ -143,6 +147,11 @@ pub struct HostEntry {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Defaults {
     pub exec_timeout_secs: Option<u64>,
+    /// Glob patterns `put_file` skips when uploading — what to leave out of an
+    /// upload (build output, VCS metadata) is a property of the source tree,
+    /// not the host, so the upload exclude is global.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// The parsed `ssh-hosts.toml`.
@@ -254,6 +263,32 @@ mod tests {
         let build = config.host("build-rig").unwrap();
         assert_eq!(config.exec_timeout_secs(prod), 600);
         assert_eq!(config.exec_timeout_secs(build), 120);
+    }
+
+    #[test]
+    fn parses_exclude_lists() {
+        let config = HostsConfig::parse(
+            r#"
+            [defaults]
+            exclude = ["target", ".git"]
+
+            [hosts.boxed]
+            hostname = "h"
+            purpose  = "p"
+            policy   = ["free"]
+            exclude  = ["*.log"]
+
+            [hosts.bare]
+            hostname = "h"
+            purpose  = "p"
+            policy   = ["free"]
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.defaults.exclude, ["target", ".git"]);
+        assert_eq!(config.host("boxed").unwrap().exclude, ["*.log"]);
+        // An absent exclude list defaults to empty.
+        assert!(config.host("bare").unwrap().exclude.is_empty());
     }
 
     #[test]

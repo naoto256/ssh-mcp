@@ -74,6 +74,9 @@ Describe your hosts in `~/.ssh/ssh-mcp.toml`:
 # per host with an exec_timeout_secs key under [hosts.<alias>].
 [defaults]
 exec_timeout_secs = 600
+# Globs put_file leaves out of an upload, matched against any name in the tree.
+# A get_file download exclude is set per host, with an exclude key under a host.
+exclude = ["target", ".git", "node_modules"]
 
 [hosts.build-rig]
 hostname = "10.0.5.12"
