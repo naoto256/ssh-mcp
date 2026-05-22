@@ -12,7 +12,9 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer};
 
 /// Fallback exec timeout when neither the host nor `[defaults]` specifies one.
-pub const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 120;
+/// Generous enough to cover most builds; a host that needs longer should set
+/// its own `exec_timeout_secs`, or run the work detached.
+pub const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 600;
 
 /// The three permission lists shared by the `def` and `claude` gates.
 ///

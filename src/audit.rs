@@ -60,7 +60,13 @@ impl AuditLog {
 
     /// Record a policy decision, including the permission mode it was made
     /// under. The command is masked before it is written.
-    pub fn record_decision(&self, host: &str, command: &str, permission_mode: &str, decision: &str) {
+    pub fn record_decision(
+        &self,
+        host: &str,
+        command: &str,
+        permission_mode: &str,
+        decision: &str,
+    ) {
         self.write(AuditEntry::Decision {
             timestamp: jiff::Timestamp::now().to_string(),
             host,

@@ -22,6 +22,19 @@ use crate::config::{HostEntry, HostsConfig};
 /// The SSH port used when a host does not specify one.
 const DEFAULT_SSH_PORT: u16 = 22;
 
+/// How long to wait for a session channel to open before treating the pooled
+/// connection as dead — a healthy connection opens one in a single round trip.
+const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long to wait for a connection — TCP, the SSH handshake, and agent auth,
+/// across every ProxyJump hop — to be established before giving up.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Send an SSH keepalive after this much silence: it keeps a long no-output
+/// command from being dropped by an idle network middlebox, and lets russh
+/// notice a frozen peer (russh closes the connection after `keepalive_max`).
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
 /// The result of running one remote command.
 #[derive(Debug, Clone)]
 pub struct ExecOutput {
@@ -45,17 +58,20 @@ impl ConnectionPool {
         let home = std::env::var_os("HOME").context("HOME is not set")?;
         Ok(Self {
             connections: Mutex::new(HashMap::new()),
-            config: Arc::new(client::Config::default()),
+            config: Arc::new(client::Config {
+                keepalive_interval: Some(KEEPALIVE_INTERVAL),
+                ..Default::default()
+            }),
             known_hosts: PathBuf::from(home).join(".ssh").join("known_hosts"),
         })
     }
 
     /// Run a command on a host and return its output.
     ///
-    /// The connection is reused if pooled. A dead pooled connection is
-    /// detected when the channel fails to open and is replaced once; because
-    /// the command runs only after a channel is open, it executes at most
-    /// once even across a reconnect.
+    /// The connection is reused if pooled. A dead pooled connection is detected
+    /// when the channel fails to open or times out, and is replaced once;
+    /// because the command runs only after a channel is open, it executes at
+    /// most once even across a reconnect.
     pub async fn exec(
         &self,
         config: &HostsConfig,
@@ -64,13 +80,13 @@ impl ConnectionPool {
         timeout: Duration,
     ) -> Result<ExecOutput> {
         let handle = self.get_or_connect(config, host_alias).await?;
-        let mut channel = match handle.channel_open_session().await {
+        let mut channel = match open_channel(&handle).await {
             Ok(channel) => channel,
             Err(_) => {
+                // The pooled connection looks dead; drop it and reconnect once.
                 self.evict(host_alias).await;
                 let handle = self.get_or_connect(config, host_alias).await?;
-                handle
-                    .channel_open_session()
+                open_channel(&handle)
                     .await
                     .context("failed to open a channel after reconnecting")?
             }
@@ -91,7 +107,18 @@ impl ConnectionPool {
         if let Some(handle) = connections.get(host_alias) {
             return Ok(handle.clone());
         }
-        let handle = Arc::new(self.connect_chain(config, host_alias).await?);
+        // Bound the whole connection setup (TCP, handshake, auth, every hop):
+        // russh imposes no handshake timeout, so a stalled peer would hang.
+        let handle =
+            match tokio::time::timeout(CONNECT_TIMEOUT, self.connect_chain(config, host_alias))
+                .await
+            {
+                Ok(result) => Arc::new(result?),
+                Err(_) => bail!(
+                    "connecting to {host_alias:?} timed out after {} seconds",
+                    CONNECT_TIMEOUT.as_secs()
+                ),
+            };
         connections.insert(host_alias.to_string(), handle.clone());
         Ok(handle)
     }
@@ -198,6 +225,21 @@ async fn authenticate(handle: &mut client::Handle<StrictHostKey>, user: &str) ->
         }
     }
     bail!("SSH agent authentication failed for user {user:?}")
+}
+
+/// Open a session channel, bounded so a frozen pooled connection is detected
+/// quickly instead of hanging. A timeout is returned as an error so the caller
+/// drops the connection and reconnects.
+async fn open_channel(handle: &client::Handle<StrictHostKey>) -> Result<Channel<client::Msg>> {
+    match tokio::time::timeout(CHANNEL_OPEN_TIMEOUT, handle.channel_open_session()).await {
+        Ok(Ok(channel)) => Ok(channel),
+        Ok(Err(e)) => Err(e).context("opening a session channel"),
+        Err(_) => bail!(
+            "opening a session channel timed out after {} seconds; the pooled \
+             connection is unresponsive",
+            CHANNEL_OPEN_TIMEOUT.as_secs()
+        ),
+    }
 }
 
 /// Run a command on an open channel, bounded by `timeout`.

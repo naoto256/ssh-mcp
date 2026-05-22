@@ -121,7 +121,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "exec",
-        description = "Run a shell command on a host from list_hosts and return its stdout, stderr, and exit code. Each call is stateless — no working directory or shell state carries to the next call, so use 'cd /path && cmd' when a directory matters."
+        description = "Run a shell command on a host from list_hosts and return its stdout, stderr, and exit code. Each call is stateless — no working directory or shell state carries to the next call, so use 'cd /path && cmd' when a directory matters. The full stdout and stderr are returned to you, so scope output deliberately: prefer filters, counts, or head/tail over dumping large files. Each call has a time limit (default 600s); for a longer-running job, start it detached and poll for completion — e.g. \"nohup sh -c 'long-cmd; echo $? > /tmp/job.rc' > /tmp/job.out 2>&1 &\", then read /tmp/job.rc on later calls."
     )]
     async fn exec(&self, params: Parameters<ExecParams>) -> Result<Json<ExecResult>, String> {
         let ExecParams { host, command } = params.0;
@@ -138,7 +138,8 @@ impl SshMcpServer {
                 .record_exec(&host, &command, Some(output.exit_code), None),
             Err(error) => {
                 let message = format!("{error:#}");
-                self.audit.record_exec(&host, &command, None, Some(&message));
+                self.audit
+                    .record_exec(&host, &command, None, Some(&message));
             }
         }
 
