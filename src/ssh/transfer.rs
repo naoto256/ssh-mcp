@@ -1,17 +1,19 @@
 //! File and directory transfer over an SSH channel, via `tar`.
 //!
-//! A transfer streams a tar archive across one channel: a download runs `tar`
-//! on the remote and extracts the stream locally; an upload builds the archive
-//! locally and feeds it to a remote `tar`. `tar` carries files and directories
-//! alike, and the stream is handled as raw bytes throughout — never decoded as
-//! text — so binary content survives intact.
-//!
-//! This is the fallback path, used whenever the rsync fast path is unavailable.
+//! A transfer streams a gzip-compressed tar archive across one channel: a
+//! download runs `tar` on the remote and extracts the stream locally; an
+//! upload builds the archive locally and feeds it to a remote `tar`. `tar`
+//! carries files and directories alike, and the stream is handled as raw
+//! bytes throughout — never decoded as text — so binary content survives
+//! intact.
 
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use flate2::Compression;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use russh::{Channel, ChannelMsg, client};
 use tar::{Archive, Builder};
 use tempfile::NamedTempFile;
@@ -20,7 +22,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 /// Statistics from one completed transfer.
 #[derive(Debug, Clone)]
 pub struct TransferStats {
-    /// The size of the tar stream that crossed the connection, in bytes.
+    /// The size of the compressed archive that crossed the connection, in bytes.
     pub bytes: u64,
 }
 
@@ -45,9 +47,10 @@ pub async fn download(
 
     let (dir, base) = split_remote(remote_path)?;
     // `tar -C dir base` archives `base` relative to `dir`, so the archive's top
-    // entry is exactly `base` regardless of how deep the remote path was.
+    // entry is exactly `base` regardless of how deep the remote path was. `-z`
+    // gzips the stream on the remote.
     let command = format!(
-        "tar -c -f - -C {} -- {}",
+        "tar -cz -f - -C {} -- {}",
         shell_quote(&dir),
         shell_quote(&base)
     );
@@ -98,7 +101,7 @@ pub async fn upload(
         .len();
 
     let command = format!(
-        "mkdir -p -- {dir} && tar -x -f - -C {dir}",
+        "mkdir -p -- {dir} && tar -xz -f - -C {dir}",
         dir = shell_quote(&dir)
     );
     let input =
@@ -208,7 +211,7 @@ fn check_remote(result: &RemoteResult) -> Result<()> {
 fn pack(source: &Path, entry_name: &str, archive: &Path) -> Result<()> {
     let file = std::fs::File::create(archive)
         .with_context(|| format!("creating {}", archive.display()))?;
-    let mut builder = Builder::new(file);
+    let mut builder = Builder::new(GzEncoder::new(file, Compression::default()));
     builder.follow_symlinks(false);
 
     let meta = std::fs::symlink_metadata(source)
@@ -222,7 +225,12 @@ fn pack(source: &Path, entry_name: &str, archive: &Path) -> Result<()> {
             .append_path_with_name(source, entry_name)
             .with_context(|| format!("archiving the file {}", source.display()))?;
     }
-    builder.finish().context("finalising the archive")?;
+    // `into_inner` finalises the tar; `finish` flushes the gzip trailer.
+    builder
+        .into_inner()
+        .context("finalising the archive")?
+        .finish()
+        .context("finalising the gzip stream")?;
     Ok(())
 }
 
@@ -234,7 +242,7 @@ fn unpack(archive: &Path, entry_name: &str, dest: &Path) -> Result<()> {
     let staging = tempfile::tempdir_in(local_parent(dest))
         .context("creating a staging directory for the download")?;
     let file = std::fs::File::open(archive).context("opening the downloaded archive")?;
-    Archive::new(file)
+    Archive::new(GzDecoder::new(file))
         .unpack(staging.path())
         .context("extracting the downloaded archive")?;
 

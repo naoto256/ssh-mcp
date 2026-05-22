@@ -2152,6 +2152,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "flate2",
  "globset",
  "jiff",
  "libc",
