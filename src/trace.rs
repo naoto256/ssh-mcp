@@ -93,88 +93,140 @@ pub struct TraceLine {
     pub text: String,
 }
 
-/// A line-stream scope selector.
+/// One stage of an op pipeline. Exactly one of the four fields must be set
+/// per step; combining them in a single step is rejected so the order of
+/// operations in a step has no ambiguity. Multiple steps compose into a
+/// pipeline by appearing in the order the caller wants them applied.
 ///
-/// At least one of `grep`, `head`, or `tail` must be supplied — an entirely
-/// empty op is rejected so the model cannot accidentally request an unscoped
-/// dump. `head` and `tail` are mutually exclusive. When `grep` is combined
-/// with `head` or `tail`, `grep` is applied first.
+/// `full` is the implicit starting point — the body the step sees if it is
+/// the first step — and is a no-op anywhere in the pipeline. It exists so
+/// the caller can write `[{full: true}]` to mean "give me everything"
+/// without having to add a dummy `head` or `tail`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct Op {
-    /// Keep only lines matching this regex (Rust regex syntax).
+pub struct OpStep {
+    /// Pass-through. Useful as the lone step when the caller wants the
+    /// whole body. Has no effect mid-pipeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grep: Option<String>,
-    /// Keep the first N lines (applied after grep, if any).
+    pub full: Option<bool>,
+    /// Keep the first N lines of whatever the previous step produced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<u32>,
-    /// Keep the last N lines (applied after grep, if any).
+    /// Keep the last N lines of whatever the previous step produced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail: Option<u32>,
+    /// Keep only lines matching this regex (Rust syntax) from whatever the
+    /// previous step produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grep: Option<String>,
 }
 
-impl Op {
-    /// Reject an op that would imply "give me everything" and rule out
-    /// combinations that have no obvious order.
+impl OpStep {
+    /// Validate a single pipeline step: exactly one of `full=true`, `head`,
+    /// `tail`, or `grep` must be set.
     pub fn validate(&self) -> Result<(), String> {
-        if self.grep.is_none() && self.head.is_none() && self.tail.is_none() {
+        let full_set = matches!(self.full, Some(true));
+        let knobs = [
+            full_set,
+            self.head.is_some(),
+            self.tail.is_some(),
+            self.grep.is_some(),
+        ];
+        let set_count = knobs.iter().filter(|&&b| b).count();
+        if set_count == 0 {
             return Err(
-                "op requires at least one of grep, head, or tail — output is otherwise unscoped"
+                "an op step needs exactly one of full=true, head, tail, or grep".into(),
+            );
+        }
+        if set_count > 1 {
+            return Err(
+                "an op step accepts only one of full=true, head, tail, or grep — \
+                 chain multiple steps to combine them"
                     .into(),
             );
         }
-        if self.head.is_some() && self.tail.is_some() {
-            return Err("op accepts head or tail, not both".into());
-        }
         Ok(())
     }
+}
 
-    /// Apply the op to a list of plain text lines. Used by `exec`, where the
-    /// stdout and stderr arrays are filtered independently and channel
-    /// tagging is not in play.
-    pub fn apply(&self, lines: Vec<String>) -> Result<(Vec<String>, u32), String> {
-        let total = lines.len() as u32;
-        let filtered: Vec<String> = if let Some(pattern) = &self.grep {
-            let re = regex::Regex::new(pattern).map_err(|e| format!("invalid grep regex: {e}"))?;
-            lines.into_iter().filter(|l| re.is_match(l)).collect()
-        } else {
-            lines
-        };
-        let scoped = if let Some(n) = self.head {
-            filtered.into_iter().take(n as usize).collect()
-        } else if let Some(n) = self.tail {
-            let len = filtered.len();
-            let skip = len.saturating_sub(n as usize);
-            filtered.into_iter().skip(skip).collect()
-        } else {
-            filtered
-        };
-        Ok((scoped, total))
+/// Validate every step in a pipeline. An empty pipeline is allowed at this
+/// level; the caller decides whether empty means "zero return" (exec) or
+/// "missing required input" (trace).
+pub fn validate_pipeline(steps: &[OpStep]) -> Result<(), String> {
+    for (i, step) in steps.iter().enumerate() {
+        step.validate()
+            .map_err(|e| format!("op step {i}: {e}"))?;
     }
+    Ok(())
+}
 
-    /// Apply the op to a list of channel-tagged lines, keeping the channel
-    /// tag attached to each surviving line. `grep` matches against the bare
-    /// text — never against any prefix — so a pattern that worked on the
-    /// original `exec` output works here unchanged.
-    pub fn apply_tagged(
-        &self,
-        lines: Vec<TraceLine>,
-    ) -> Result<Vec<TraceLine>, String> {
-        let filtered: Vec<TraceLine> = if let Some(pattern) = &self.grep {
-            let re = regex::Regex::new(pattern).map_err(|e| format!("invalid grep regex: {e}"))?;
-            lines.into_iter().filter(|l| re.is_match(&l.text)).collect()
-        } else {
-            lines
-        };
-        Ok(if let Some(n) = self.head {
-            filtered.into_iter().take(n as usize).collect()
-        } else if let Some(n) = self.tail {
-            let len = filtered.len();
-            let skip = len.saturating_sub(n as usize);
-            filtered.into_iter().skip(skip).collect()
-        } else {
-            filtered
-        })
+/// Apply an op pipeline to a list of plain text lines, in order. `full` is a
+/// pass-through; `head`/`tail`/`grep` narrow the running set. Returns the
+/// final lines together with the pre-pipeline total so callers can report
+/// how much was dropped.
+pub fn apply_pipeline(
+    lines: Vec<String>,
+    steps: &[OpStep],
+) -> Result<(Vec<String>, u32), String> {
+    let total = lines.len() as u32;
+    let mut cur = lines;
+    for (i, step) in steps.iter().enumerate() {
+        cur = apply_step_plain(cur, step).map_err(|e| format!("op step {i}: {e}"))?;
     }
+    Ok((cur, total))
+}
+
+fn apply_step_plain(lines: Vec<String>, step: &OpStep) -> Result<Vec<String>, String> {
+    if matches!(step.full, Some(true)) {
+        return Ok(lines);
+    }
+    if let Some(n) = step.head {
+        return Ok(lines.into_iter().take(n as usize).collect());
+    }
+    if let Some(n) = step.tail {
+        let skip = lines.len().saturating_sub(n as usize);
+        return Ok(lines.into_iter().skip(skip).collect());
+    }
+    if let Some(pattern) = &step.grep {
+        let re = regex::Regex::new(pattern).map_err(|e| format!("invalid grep regex: {e}"))?;
+        return Ok(lines.into_iter().filter(|l| re.is_match(l)).collect());
+    }
+    Err("step has no operation set".into())
+}
+
+/// Apply an op pipeline to channel-tagged lines, keeping the tags attached.
+/// `grep` matches against the bare text — never against the channel prefix
+/// — so a pattern that worked on the original `exec` result works here
+/// unchanged.
+pub fn apply_tagged_pipeline(
+    lines: Vec<TraceLine>,
+    steps: &[OpStep],
+) -> Result<Vec<TraceLine>, String> {
+    let mut cur = lines;
+    for (i, step) in steps.iter().enumerate() {
+        cur = apply_step_tagged(cur, step).map_err(|e| format!("op step {i}: {e}"))?;
+    }
+    Ok(cur)
+}
+
+fn apply_step_tagged(
+    lines: Vec<TraceLine>,
+    step: &OpStep,
+) -> Result<Vec<TraceLine>, String> {
+    if matches!(step.full, Some(true)) {
+        return Ok(lines);
+    }
+    if let Some(n) = step.head {
+        return Ok(lines.into_iter().take(n as usize).collect());
+    }
+    if let Some(n) = step.tail {
+        let skip = lines.len().saturating_sub(n as usize);
+        return Ok(lines.into_iter().skip(skip).collect());
+    }
+    if let Some(pattern) = &step.grep {
+        let re = regex::Regex::new(pattern).map_err(|e| format!("invalid grep regex: {e}"))?;
+        return Ok(lines.into_iter().filter(|l| re.is_match(&l.text)).collect());
+    }
+    Err("step has no operation set".into())
 }
 
 /// One trace entry: the full detail of a single tool call, recorded so the
@@ -326,49 +378,157 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_rejects_an_empty_op() {
-        assert!(Op::default().validate().is_err());
-    }
-
-    #[test]
-    fn validate_rejects_head_and_tail_together() {
-        let op = Op {
+    fn step_validate_rejects_empty_and_multi_knob_steps() {
+        assert!(OpStep::default().validate().is_err());
+        let multi = OpStep {
             head: Some(10),
             tail: Some(10),
-            ..Op::default()
+            ..OpStep::default()
         };
-        assert!(op.validate().is_err());
+        assert!(multi.validate().is_err());
+        let full_and_grep = OpStep {
+            full: Some(true),
+            grep: Some("x".into()),
+            ..OpStep::default()
+        };
+        assert!(full_and_grep.validate().is_err());
     }
 
     #[test]
-    fn apply_grep_then_tail_is_grep_first() {
-        let op = Op {
-            grep: Some("error".into()),
-            tail: Some(2),
-            ..Op::default()
-        };
+    fn step_validate_accepts_each_single_knob() {
+        assert!(OpStep {
+            full: Some(true),
+            ..OpStep::default()
+        }
+        .validate()
+        .is_ok());
+        assert!(OpStep {
+            head: Some(5),
+            ..OpStep::default()
+        }
+        .validate()
+        .is_ok());
+        assert!(OpStep {
+            tail: Some(5),
+            ..OpStep::default()
+        }
+        .validate()
+        .is_ok());
+        assert!(OpStep {
+            grep: Some("x".into()),
+            ..OpStep::default()
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn pipeline_head_then_tail_is_a_sliding_window() {
+        // [head 100, tail 50] on 200 lines = first 100, then last 50 of
+        // those = lines 51..100. Composition order is the source of truth.
+        let lines: Vec<String> = (1..=200).map(|i| i.to_string()).collect();
+        let steps = vec![
+            OpStep {
+                head: Some(100),
+                ..OpStep::default()
+            },
+            OpStep {
+                tail: Some(50),
+                ..OpStep::default()
+            },
+        ];
+        let (scoped, total) = apply_pipeline(lines, &steps).unwrap();
+        assert_eq!(total, 200);
+        assert_eq!(scoped.len(), 50);
+        assert_eq!(scoped.first().map(String::as_str), Some("51"));
+        assert_eq!(scoped.last().map(String::as_str), Some("100"));
+    }
+
+    #[test]
+    fn pipeline_full_is_a_passthrough() {
+        let lines = vec!["a".into(), "b".into(), "c".into()];
+        let steps = vec![OpStep {
+            full: Some(true),
+            ..OpStep::default()
+        }];
+        let (scoped, _total) = apply_pipeline(lines.clone(), &steps).unwrap();
+        assert_eq!(scoped, lines);
+
+        // Mid-pipeline `full` is also a no-op; the surrounding steps still
+        // narrow.
+        let steps_mid = vec![
+            OpStep {
+                head: Some(2),
+                ..OpStep::default()
+            },
+            OpStep {
+                full: Some(true),
+                ..OpStep::default()
+            },
+        ];
+        let (scoped_mid, _total) = apply_pipeline(lines, &steps_mid).unwrap();
+        assert_eq!(scoped_mid, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn pipeline_order_matters_for_grep_combinations() {
+        // `[grep error, tail 2]` keeps the last 2 of the matching lines.
         let lines = vec![
             "error 1".into(),
-            "info 2".into(),
+            "info".into(),
             "error 3".into(),
-            "info 4".into(),
             "error 5".into(),
         ];
-        let (scoped, total) = op.apply(lines).unwrap();
-        assert_eq!(total, 5);
+        let steps = vec![
+            OpStep {
+                grep: Some("error".into()),
+                ..OpStep::default()
+            },
+            OpStep {
+                tail: Some(2),
+                ..OpStep::default()
+            },
+        ];
+        let (scoped, _total) = apply_pipeline(lines.clone(), &steps).unwrap();
         assert_eq!(scoped, vec!["error 3".to_string(), "error 5".to_string()]);
+
+        // Reverse: `[tail 2, grep error]` first takes the last 2 lines
+        // (one of which doesn't match), then greps — a smaller result.
+        let lines = vec![
+            "error 1".into(),
+            "info".into(),
+            "error 3".into(),
+            "trailing info".into(),
+        ];
+        let steps_rev = vec![
+            OpStep {
+                tail: Some(2),
+                ..OpStep::default()
+            },
+            OpStep {
+                grep: Some("error".into()),
+                ..OpStep::default()
+            },
+        ];
+        let (scoped_rev, _total) = apply_pipeline(lines, &steps_rev).unwrap();
+        assert_eq!(scoped_rev, vec!["error 3".to_string()]);
     }
 
     #[test]
-    fn apply_tagged_filters_on_bare_text() {
+    fn apply_tagged_pipeline_filters_on_bare_text() {
         // The grep pattern matches the raw line content, not the channel
         // tag. A pattern that worked on the original exec output keeps
         // working through trace.
-        let op = Op {
-            grep: Some("^[1-9]$".into()),
-            head: Some(3),
-            ..Op::default()
-        };
+        let steps = vec![
+            OpStep {
+                grep: Some("^[1-9]$".into()),
+                ..OpStep::default()
+            },
+            OpStep {
+                head: Some(3),
+                ..OpStep::default()
+            },
+        ];
         let lines = vec![
             TraceLine {
                 channel: Channel::Stdout,
@@ -391,7 +551,7 @@ mod tests {
                 text: "10".into(), // does not match [1-9] alone
             },
         ];
-        let kept = op.apply_tagged(lines).unwrap();
+        let kept = apply_tagged_pipeline(lines, &steps).unwrap();
         assert_eq!(kept.len(), 3);
         assert_eq!(kept[0].text, "1");
         assert_eq!(kept[1].text, "2");

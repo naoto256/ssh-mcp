@@ -28,7 +28,8 @@ use crate::config::HostsConfig;
 use crate::pathnorm;
 use crate::ssh::ConnectionPool;
 use crate::trace::{
-    Channel, DEFAULT_TRACE_DEPTH, Op, Stream, TraceBuffer, TraceEntry, TraceLine, chunks_to_lines,
+    Channel, DEFAULT_TRACE_DEPTH, OpStep, Stream, TraceBuffer, TraceEntry, TraceLine,
+    apply_pipeline, apply_tagged_pipeline, chunks_to_lines, validate_pipeline,
 };
 
 /// A host as shown to the model: what it is for and how it is gated, never
@@ -59,11 +60,19 @@ pub struct ExecParams {
     pub host: String,
     /// The shell command to run on the host.
     pub command: String,
-    /// Output scope, applied to stdout and stderr before they are returned.
-    /// At least one of `grep`, `head`, or `tail` is required so the model
-    /// cannot accidentally request an unscoped dump. The full output is
-    /// retained by the daemon and can be re-scoped with `trace`.
-    pub op: Op,
+    /// Output scope as an ordered pipeline of steps. Omit or pass an empty
+    /// array to skip returning stdout/stderr entirely — the result then
+    /// carries just the exit code and counts, and the full output stays in
+    /// the trace buffer for later inspection through `trace`. To get the
+    /// body inline, pass at least one step: `[{full: true}]` for
+    /// everything, `[{tail: 50}]` for the last 50, `[{grep: "err"}]` for
+    /// matching lines, or chain — `[{head: 100}, {tail: 50}, {grep: "x"}]`
+    /// reads the first 100, then keeps the last 50 of those (a sliding
+    /// window from line 51 to 100), then greps. The implicit starting
+    /// point is the full body, so `{full: true}` only needs to be written
+    /// when it's the lone step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub op: Vec<OpStep>,
 }
 
 /// The result of `exec`.
@@ -97,11 +106,14 @@ pub struct TraceParams {
     /// that, and so on. Defaults to the most recent.
     #[serde(default)]
     pub index: u32,
-    /// Output scope, applied to the recorded body. At least one of `grep`,
-    /// `head`, or `tail` is required. `grep` matches against the raw line
-    /// text — never against the `stdout:` / `stderr:` prefix — so a pattern
-    /// that worked on the original `exec` result keeps working here.
-    pub op: Op,
+    /// Output scope as an ordered pipeline of steps, applied to the
+    /// recorded body. At least one step is required (an empty pipeline is
+    /// rejected — call `exec` with an empty op if you only want metadata).
+    /// Each step is one of `{full: true}`, `{head: N}`, `{tail: N}`, or
+    /// `{grep: STR}`; chain them to compose. `grep` matches the raw line
+    /// text — never the `stdout:` / `stderr:` prefix — so a pattern that
+    /// worked on the original `exec` result keeps working here.
+    pub op: Vec<OpStep>,
     /// Which channels of an `exec` entry to surface. Defaults to `both`
     /// (channel-prefixed output, arrival order preserved). Set to `stdout`
     /// or `stderr` to look at one channel with no prefix. Ignored for
@@ -315,11 +327,11 @@ impl SshMcpServer {
 
     #[tool(
         name = "exec",
-        description = "**DO NOT pipe through `tail` / `head` / `grep` in the shell command — pass an `op` instead.** Those pipes scope at the shell level and throw away the bytes `trace` would have shown; the `op` parameter scopes at the tool level and the full unscoped stdout/stderr is retained in the per-session trace buffer for re-scoping. Pipes to scoping programs trigger an advisory `note` on the result.\n\nRun a shell command on a host from list_hosts and return its exit code with op-scoped stdout/stderr. Each call is stateless — no working directory or shell state carries to the next call, so use 'cd /path && cmd' when a directory matters. The `op` parameter is required: pass `tail` / `head` / `grep` so the returned slice is deliberately scoped. Each call has a time limit (default 600s); for a longer-running job, start it detached and poll for completion — e.g. \"nohup sh -c 'long-cmd; echo $? > /tmp/job.rc' > /tmp/job.out 2>&1 &\", then read /tmp/job.rc on later calls."
+        description = "**DO NOT pipe through `tail` / `head` / `grep` in the shell command — use the `op` pipeline instead.** Shell-side pipes scope before the daemon sees the bytes, so `trace` only has the post-pipe slice; double-scoping triggers an advisory `note` on the result.\n\nRun a shell command on a host from list_hosts. Returns the exit code, line counts, and (optionally) the scoped output. `op` is an ordered pipeline of steps — omit it or pass `[]` to get the metadata only (the full output stays in the per-session trace buffer for inspection through `trace`). To get the body inline, pass at least one step: `[{full: true}]` for everything, `[{tail: 50}]` for the last 50 lines, `[{grep: \"err\"}]` for matches, or chain — `[{head: 100}, {tail: 50}]` is a sliding window from line 51 to 100. Steps apply in order; the implicit start is the full body. Each call is stateless (no cwd or shell state carries over, use `cd /path && cmd`). Each call has a time limit (default 600s); for a longer-running job, start it detached and poll — e.g. \"nohup sh -c 'long-cmd; echo $? > /tmp/job.rc' > /tmp/job.out 2>&1 &\", then read /tmp/job.rc later."
     )]
     async fn exec(&self, params: Parameters<ExecParams>) -> Result<Json<ExecResult>, String> {
         let ExecParams { host, command, op } = params.0;
-        op.validate()?;
+        validate_pipeline(&op)?;
         let config = HostsConfig::load(&self.config_path).map_err(|e| format!("{e:#}"))?;
         let timeout = match config.host(&host) {
             Some(entry) => Duration::from_secs(config.exec_timeout_secs(entry)),
@@ -364,8 +376,18 @@ impl SshMcpServer {
             })
             .await;
 
-        let (stdout, stdout_lines) = op.apply(stdout_all)?;
-        let (stderr, stderr_lines) = op.apply(stderr_all)?;
+        let (stdout, stdout_lines) = if op.is_empty() {
+            // Body is omitted from the result; counts still come back so
+            // the model can decide whether to drill into trace.
+            (Vec::new(), stdout_all.len() as u32)
+        } else {
+            apply_pipeline(stdout_all, &op)?
+        };
+        let (stderr, stderr_lines) = if op.is_empty() {
+            (Vec::new(), stderr_all.len() as u32)
+        } else {
+            apply_pipeline(stderr_all, &op)?
+        };
         let note = detect_trailing_scope_pipe(&command).map(|program| {
             format!(
                 "the command ends in `| {program}` — the shell scoped the output before the \
@@ -385,7 +407,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "trace",
-        description = "Re-inspect the full detail of a recent tool call on this MCP session. The other tools return slim summaries to keep context lean; trace retrieves the body that backed them. The op parameter is required (tail/head/grep, with grep applied before head/tail) so output stays scoped. `grep` matches the raw line text — the `stdout:` / `stderr:` prefix is never matched against — so a pattern that worked on the original `exec` result keeps working here. `stream` (default `both`) selects which channels of an `exec` entry to show: `both` prefixes each line with `stdout: ` or `stderr: ` and preserves the arrival order; `stdout` or `stderr` returns only that channel with no prefix. `stream` is ignored for transfer entries. `index` selects which past call to look at: 0 is the most recent (default), 1 the one before that, up to 4 — the buffer holds the last 5 calls per session. For transfer entries, set `include_skipped` to mix the hash-matched (skipped) paths into the body. trace itself is not recorded."
+        description = "Re-inspect the full detail of a recent tool call on this MCP session. The other tools return slim summaries to keep context lean; trace retrieves the body that backed them. The `op` parameter is an ordered pipeline of steps — at least one step is required so the response stays deliberately scoped. Each step is one of `{full: true}`, `{head: N}`, `{tail: N}`, `{grep: STR}`; steps apply in order, with the implicit start being the full body. For example `[{full: true}]` returns everything, `[{tail: 50}]` the last 50, `[{grep: \"err\"}]` matching lines, and `[{head: 100}, {tail: 50}, {grep: \"x\"}]` reads the first 100, keeps the last 50 of those, then greps. `grep` matches the raw line text — never any `stdout:` / `stderr:` prefix — so a pattern that worked on the original `exec` result keeps working here. `stream` (default `both`) selects which channels of an `exec` entry to show: `both` prefixes each line with `stdout: ` or `stderr: ` and preserves the arrival order; `stdout` or `stderr` returns only that channel with no prefix. `stream` is ignored for transfer entries. `index` selects which past call to look at: 0 is the most recent (default), 1 the one before that, up to 4 — the buffer holds the last 5 calls per session. For transfer entries, set `include_skipped` to mix the hash-matched (skipped) paths into the body. trace itself is not recorded."
     )]
     async fn trace(&self, params: Parameters<TraceParams>) -> Result<Json<TraceResult>, String> {
         let TraceParams {
@@ -394,7 +416,14 @@ impl SshMcpServer {
             stream,
             include_skipped,
         } = params.0;
-        op.validate()?;
+        if op.is_empty() {
+            return Err(
+                "trace requires at least one op step — pass `[{full: true}]` for the whole body, \
+                 or chain head/tail/grep to narrow"
+                    .into(),
+            );
+        }
+        validate_pipeline(&op)?;
         let entry = self
             .trace
             .fetch(index as usize)
@@ -444,7 +473,7 @@ impl SshMcpServer {
             None
         };
 
-        let kept = op.apply_tagged(body)?;
+        let kept = apply_tagged_pipeline(body, &op)?;
         // Output formatting: prefix exec channels only when `stream = both`
         // (otherwise the prefix is unambiguous from the parameter the
         // caller already chose).

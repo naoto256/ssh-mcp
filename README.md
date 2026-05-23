@@ -31,16 +31,19 @@ must be an alias from `list_hosts`.
 | Tool | What it does |
 |---|---|
 | `list_hosts` | Returns each host's alias, purpose, tags, and policy kinds — **never** an address, user, or credential. Read-only, ungated. |
-| `exec` | Runs a shell command on a host and returns the exit code with scoped stdout/stderr. Requires an `op` (`tail` / `head` / `grep`) so output stays deliberately scoped; the full streams are kept in the per-session trace buffer for re-inspection. Piping the command through `tail` / `head` / `grep` yourself (instead of using `op`) defeats the trace path; the daemon spots that and returns an advisory `note` on the result. |
+| `exec` | Runs a shell command on a host and returns the exit code, line counts, and (optionally) the scoped output. The `op` parameter is an ordered pipeline of steps; omit it or pass `[]` to get metadata only (the body stays in the per-session trace buffer for inspection via `trace`). To get the body inline, pass at least one step: `[{full: true}]` for everything, `[{tail: 50}]` for the last 50, or chain like `[{head: 100}, {tail: 50}, {grep: "err"}]`. Piping the command through `tail` / `head` / `grep` yourself defeats the trace path; the daemon spots that and returns an advisory `note` on the result. |
 | `get` | Downloads a file or directory. If the local destination is an existing directory the entry lands inside it under its remote base name (the `cp` rule); otherwise it replaces the destination. Returns wire bytes (tar framing + metadata, not the sum of file content sizes). |
 | `put` | Symmetric: uploads a local file or directory. If the remote destination is an existing directory the entry lands inside; otherwise it replaces. Returns wire bytes (same meaning as `get`). |
 | `sync_get` / `sync_put` | Mirror a directory in either direction. Both paths are treated as roots: files in the destination that are absent from the source are deleted; files matching by sha-256 are skipped. Returns per-op counts and the wire bytes for the files that actually moved. |
-| `trace` | Re-inspects the full detail of a recent tool call from a per-session ring buffer (depth 5, 10 MiB per entry). Requires an `op`, and accepts a `stream` selector (`stdout` / `stderr` / `both`, default `both`) for exec entries. `grep` matches the bare line text, so a pattern that worked on the original `exec` result keeps working. Transfer entries come back as `<verb> <path>` lines. |
+| `trace` | Re-inspects the full detail of a recent tool call from a per-session ring buffer (depth 5, 10 MiB per entry). `op` is the same pipeline shape as `exec`, but required (at least one step — pass `[{full: true}]` for the whole body). Accepts a `stream` selector (`stdout` / `stderr` / `both`, default `both`) for exec entries. `grep` matches the bare line text, so a pattern that worked on the original `exec` result keeps working. Transfer entries come back as `<verb> <path>` lines. |
 
-The `op` requirement on `exec` and `trace` is deliberate. Models reading the
-schema know to scope output through the tool, not by piping through
-`tail` / `head` / `grep` in the command itself — the latter throws away the
-exact bytes `trace` would have shown.
+The `op` pipeline on `exec` and `trace` exists so scoping happens through the
+tool, not through `tail` / `head` / `grep` pipes in the shell command itself
+— the latter throws away the exact bytes `trace` would have shown. The
+pipeline shape lets the model compose narrowing steps (`[{head: 100},
+{tail: 50}]` is a sliding window from line 51 to 100) and surfaces a clear
+"give me nothing" default on `exec` (omit `op` to keep result context-light
+and pull what you need later through `trace`).
 
 ## Build
 

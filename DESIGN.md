@@ -218,13 +218,51 @@ Models running shells reflexively pipe through `tail`, `head`, and
 exec: most of the time the agent wants the last error line, the first
 hit, or a count.
 
-ssh-mcp lifts that into the tool surface: `exec` (and `trace`) require an
-`op` parameter — exactly one of `tail`, `head`, or `grep`, with `grep`
-combinable with `head` or `tail`. An empty op is rejected so an unscoped
-dump cannot be requested by accident.
+ssh-mcp lifts that into the tool surface as a composable **op
+pipeline**: an ordered array of steps, each step being one of
+`{full: true}`, `{head: N}`, `{tail: N}`, `{grep: STR}`. Steps apply
+in order; the implicit start is the full body. Two consequences
+worth naming:
 
-The tool returns only the scoped slice. The full stdout/stderr is kept
-in the trace buffer (next).
+- **Composition over precedence.** `[{head: 100}, {tail: 50}]` is a
+  sliding window from line 51 to 100 — a real primitive that emerges
+  from putting the steps in that order. Hard-coding "grep before
+  head/tail" or any other fixed precedence would have lost it.
+- **`full` is the no-op step.** Pipelines always start from the full
+  body, so `{full: true}` is just pass-through. It exists as a step
+  so the caller can write `[{full: true}]` to express "give me
+  everything" without having to invent a dummy narrowing op.
+
+`exec` makes the pipeline **optional**. Omit `op` (or pass `[]`) and
+the result carries only the exit code and the raw line counts — the
+full output is in the trace buffer, callable on demand through
+`trace`. Pass a pipeline and the result includes the scoped body.
+The default is therefore "smallest possible result; expand
+deliberately", which is the right shape for an LLM caller: spend
+context only on the slice you actually need.
+
+`trace` makes the pipeline **required** (empty arrays rejected) — its
+whole purpose is to return body, so a no-body call would be a mistake.
+`[{full: true}]` is the natural "give me everything" form there.
+
+A model that has internalised "scope your output" will still sometimes
+double-scope — pass an `op` *and* pipe the command through `tail` in
+the shell. The reflex is safe-feeling but expensive: the shell has
+already scoped at its level, so the trace buffer only contains the
+post-pipe slice. Re-scoping through `trace` would just return the
+same lines back.
+
+Spelling that out in the description is necessary but not sufficient
+(models read schemas, then fall back to instinct). So the daemon also
+notices: a quote-aware scan finds the last unquoted pipe and, if it
+targets a known scoping program (`tail` / `head` / `grep` / `egrep` /
+`fgrep` / `rg`), the result carries an advisory `note` explaining what
+was lost and pointing at `op`. The exec still runs — the command was
+the caller's intent — and the note is just a low-strength signal that
+travels back with the result. The combination of "execution succeeds"
+plus "small annoying message every time" turns out to be exactly the
+shape that nudges a model away from the pattern without provoking it
+into looking for a workaround.
 
 A model that has internalised "scope your output" will still sometimes
 double-scope — pass an `op` *and* pipe the command through `tail` in
@@ -250,7 +288,8 @@ into looking for a workaround.
 Each MCP session has its own ring buffer holding the last five tool
 calls in full. A new tool — `trace(index, op, stream?)` — fetches one
 of those entries by index (0 = most recent, up to 4) and applies an op
-to the body before returning it. `trace` itself is not recorded.
+pipeline to the body before returning it. `trace` itself is not
+recorded.
 
 The buffer is per-session because sessions are independent agent
 conversations; one session must not be able to see another's traces.
