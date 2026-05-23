@@ -229,7 +229,7 @@ async fn decide_subject(
         return Decision::Allow;
     }
 
-    let rule_gates = match evaluator.evaluate_rule_gates(host_entry, &subject) {
+    let rule_gates = match evaluator.evaluate_rule_gates(config, host_entry, &subject) {
         Ok(gates) => gates,
         Err(e) => {
             eprintln!("ssh-mcp: rule evaluation failed, denying: {e:#}");

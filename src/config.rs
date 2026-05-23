@@ -54,7 +54,12 @@ pub enum NamedGate {
 /// One gate in a host's `policy` array.
 ///
 /// Paramless gates are written as strings (`"free"`, `"def"`, `"claude"`);
-/// the parameterized `hook` gate is written as an inline table.
+/// the parameterized gates are written as an inline table —
+/// `{ hook = "..." }` for an external hook program, or `{ def = "name" }`
+/// to reference a named ruleset defined in a top-level `[def.<name>]`
+/// table. Named def references compose like any other gate: multiple of
+/// them are evaluated strictest-wins together with whatever else the host
+/// lists.
 #[derive(Debug, Clone)]
 pub enum Gate {
     Named(NamedGate),
@@ -62,17 +67,26 @@ pub enum Gate {
     Hook {
         hook: String,
     },
+    /// Apply the rules from `[def.<name>]`. Lets the same ruleset be
+    /// shared across hosts without duplicating the lists.
+    DefRef {
+        name: String,
+    },
 }
 
 impl Gate {
     /// The gate's kind as a short string, for display in `list_hosts`. The
-    /// `hook` gate's program path is intentionally not exposed.
+    /// `hook` gate's program path and the `def` ref's name are intentionally
+    /// not exposed — a model only needs to know "this is gated by an
+    /// external hook" or "this host applies some def ruleset", not which
+    /// program or which ruleset.
     pub fn kind(&self) -> &'static str {
         match self {
             Gate::Named(NamedGate::Free) => "free",
             Gate::Named(NamedGate::Def) => "def",
             Gate::Named(NamedGate::Claude) => "claude",
             Gate::Hook { .. } => "hook",
+            Gate::DefRef { .. } => "def",
         }
     }
 }
@@ -88,7 +102,9 @@ impl<'de> Deserialize<'de> for Gate {
             type Value = Gate;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a gate name string or a { hook = \"...\" } table")
+                f.write_str(
+                    "a gate name string, a { hook = \"...\" } table, or a { def = \"name\" } table",
+                )
             }
 
             fn visit_str<E: de::Error>(self, value: &str) -> Result<Gate, E> {
@@ -102,16 +118,26 @@ impl<'de> Deserialize<'de> for Gate {
 
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Gate, A::Error> {
                 let mut hook: Option<String> = None;
+                let mut def_ref: Option<String> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "hook" => hook = Some(map.next_value()?),
+                        "def" => def_ref = Some(map.next_value()?),
                         other => {
                             return Err(de::Error::custom(format!("unknown gate field {other:?}")));
                         }
                     }
                 }
-                hook.map(|h| Gate::Hook { hook: h })
-                    .ok_or_else(|| de::Error::custom("gate table is missing `hook`"))
+                match (hook, def_ref) {
+                    (Some(_), Some(_)) => Err(de::Error::custom(
+                        "gate table sets both `hook` and `def`; use one per gate",
+                    )),
+                    (Some(h), None) => Ok(Gate::Hook { hook: h }),
+                    (None, Some(n)) => Ok(Gate::DefRef { name: n }),
+                    (None, None) => Err(de::Error::custom(
+                        "gate table is missing one of `hook` or `def`",
+                    )),
+                }
             }
         }
 
@@ -161,12 +187,23 @@ pub struct HostsConfig {
     pub defaults: Defaults,
     #[serde(default)]
     pub hosts: HashMap<String, HostEntry>,
+    /// Named, reusable `def` rulesets. A host references one through a
+    /// `{ def = "name" }` gate in its `policy` array; multiple references
+    /// compose strictest-wins. The lookup is by name; a missing entry is
+    /// surfaced at evaluation time, not at config load.
+    #[serde(default)]
+    pub def: HashMap<String, Permissions>,
 }
 
 impl HostsConfig {
     /// Parse a config from a TOML string.
     pub fn parse(toml_str: &str) -> Result<Self> {
         toml::from_str(toml_str).context("failed to parse ssh-mcp.toml")
+    }
+
+    /// Look up a named def ruleset by name.
+    pub fn named_def(&self, name: &str) -> Option<&Permissions> {
+        self.def.get(name)
     }
 
     /// Read and parse the config from disk.
@@ -298,6 +335,52 @@ mod tests {
             hostname = "h"
             purpose  = "p"
             policy   = ["bogus"]
+        "#;
+        assert!(HostsConfig::parse(bad).is_err());
+    }
+
+    #[test]
+    fn parses_a_named_def_ref_and_its_table() {
+        // A host references a top-level `[def.NAME]` ruleset through a
+        // `{ def = "NAME" }` gate. The ruleset itself lives under
+        // `[def.NAME]` and is shared across every host that references it.
+        let config = HostsConfig::parse(
+            r#"
+            [hosts.staging]
+            hostname = "h"
+            purpose  = "p"
+            policy   = [{ def = "shared" }, "claude"]
+
+            [def.shared]
+            allow = ["Bash(systemctl status:*)"]
+            deny  = ["Bash(rm:*)"]
+        "#,
+        )
+        .unwrap();
+        let host = config.host("staging").unwrap();
+        assert_eq!(host.policy.len(), 2);
+        match &host.policy[0] {
+            Gate::DefRef { name } => assert_eq!(name, "shared"),
+            other => panic!("expected a DefRef gate, got {other:?}"),
+        }
+        let shared = config.named_def("shared").expect("named def should parse");
+        assert_eq!(shared.allow, ["Bash(systemctl status:*)"]);
+        assert_eq!(shared.deny, ["Bash(rm:*)"]);
+    }
+
+    #[test]
+    fn rejects_a_gate_table_with_both_hook_and_def() {
+        // A single gate table must specify one kind; the two are
+        // independent gates and should appear as separate array elements
+        // if you want both.
+        let bad = r#"
+            [hosts.x]
+            hostname = "h"
+            purpose  = "p"
+            policy   = [{ hook = "/bin/h", def = "shared" }]
+
+            [def.shared]
+            allow = ["Bash(ls)"]
         "#;
         assert!(HostsConfig::parse(bad).is_err());
     }

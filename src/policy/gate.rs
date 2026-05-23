@@ -7,7 +7,7 @@
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use super::Decision;
@@ -83,7 +83,7 @@ impl Evaluator {
         if host.policy.is_empty() {
             return Ok(Decision::Allow);
         }
-        let rules = self.evaluate_rule_gates(host, &Subject::Command(command))?;
+        let rules = self.evaluate_rule_gates(config, host, &Subject::Command(command))?;
         let mut decisions = rules.decisions;
         decisions.extend(rules.hook_programs.iter().map(|_| Decision::Unset));
         Ok(combine_gates(&decisions, Decision::Ask))
@@ -100,15 +100,29 @@ impl Evaluator {
         Ok(set.check(tool, path))
     }
 
-    /// Evaluate the rule-based gates (`free`, `def`, `claude`) of a non-empty
-    /// host policy. Hook gates are not run here — they require spawning a
-    /// subprocess — so their program paths are returned for the caller.
+    /// Evaluate the rule-based gates (`free`, `def`, `claude`, named def
+    /// references) of a non-empty host policy. Hook gates are not run here —
+    /// they require spawning a subprocess — so their program paths are
+    /// returned for the caller.
     ///
     /// The caller handles the empty-policy and unknown-host cases, runs the
     /// returned hook programs, and applies [`combine_gates`] to the full set.
-    pub fn evaluate_rule_gates(&self, host: &HostEntry, subject: &Subject) -> Result<RuleGates> {
-        // The `def` and `claude` gates share the Claude Code rule grammar, so
-        // their rules are merged into one set and evaluated once.
+    ///
+    /// A named-def reference whose target is missing from `config.def` is an
+    /// error: the gate cannot be evaluated, so the function fails closed
+    /// rather than silently treating it as an abstention. The caller turns
+    /// that into a `Deny` decision with a diagnostic that points at the
+    /// misspelled name.
+    pub fn evaluate_rule_gates(
+        &self,
+        config: &HostsConfig,
+        host: &HostEntry,
+        subject: &Subject,
+    ) -> Result<RuleGates> {
+        // All rule-based gates share the Claude Code rule grammar, so their
+        // rules are merged into one set and evaluated once. Duplicate refs
+        // to the same named ruleset are idempotent: the same allow/ask/deny
+        // lines are appended again with no semantic effect.
         let mut merged = Permissions::default();
         let mut has_rule_gate = false;
         let mut decisions: Vec<Decision> = Vec::new();
@@ -128,6 +142,16 @@ impl Evaluator {
                     has_rule_gate = true;
                 }
                 Gate::Hook { hook } => hook_programs.push(hook.clone()),
+                Gate::DefRef { name } => {
+                    let Some(rules) = config.named_def(name) else {
+                        bail!(
+                            "the host's policy references the named def ruleset {name:?}, \
+                             but no `[def.{name}]` table is defined in the inventory"
+                        );
+                    };
+                    merged.merge_from(rules);
+                    has_rule_gate = true;
+                }
             }
         }
 
@@ -354,6 +378,7 @@ mod tests {
 
         let denied = ev
             .evaluate_rule_gates(
+                &cfg,
                 host,
                 &Subject::Path {
                     tool: Tool::Read,
@@ -365,6 +390,7 @@ mod tests {
 
         let allowed = ev
             .evaluate_rule_gates(
+                &cfg,
                 host,
                 &Subject::Path {
                     tool: Tool::Write,
@@ -400,5 +426,128 @@ mod tests {
         );
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn named_def_ref_applies_shared_rules() {
+        // Two hosts share the same `[def.locked-down]` ruleset through a
+        // `{ def = "locked-down" }` gate. Both hosts see the same decision.
+        let cfg = config(
+            r#"
+            [hosts.api-a]
+            hostname = "ha"
+            purpose  = "p"
+            policy   = [{ def = "locked-down" }]
+
+            [hosts.api-b]
+            hostname = "hb"
+            purpose  = "p"
+            policy   = [{ def = "locked-down" }]
+
+            [def.locked-down]
+            deny = ["Bash(rm:*)"]
+        "#,
+        );
+        let ev = evaluator();
+        assert_eq!(ev.evaluate(&cfg, "api-a", "rm -rf /").unwrap(), Decision::Deny);
+        assert_eq!(ev.evaluate(&cfg, "api-b", "rm -rf /").unwrap(), Decision::Deny);
+        // A non-matching command falls through to the no-match fallback.
+        assert_eq!(ev.evaluate(&cfg, "api-a", "ls").unwrap(), Decision::Ask);
+    }
+
+    #[test]
+    fn multiple_named_def_refs_compose_strictest_wins() {
+        // Two named defs are stacked. The second one denies what the first
+        // only asked for — the stricter decision wins.
+        let cfg = config(
+            r#"
+            [hosts.h]
+            hostname = "h"
+            purpose  = "p"
+            policy   = [{ def = "baseline" }, { def = "prod" }]
+
+            [def.baseline]
+            ask = ["Bash(systemctl restart:*)"]
+
+            [def.prod]
+            deny = ["Bash(systemctl restart:*)"]
+        "#,
+        );
+        assert_eq!(
+            evaluator()
+                .evaluate(&cfg, "h", "systemctl restart nginx")
+                .unwrap(),
+            Decision::Deny,
+        );
+    }
+
+    #[test]
+    fn duplicate_named_def_refs_are_idempotent() {
+        // Referencing the same named ruleset twice has the same effect as
+        // referencing it once — duplicate ask/deny lines compose to the
+        // same decision.
+        let cfg = config(
+            r#"
+            [hosts.h]
+            hostname = "h"
+            purpose  = "p"
+            policy   = [{ def = "locked" }, { def = "locked" }]
+
+            [def.locked]
+            deny = ["Bash(rm:*)"]
+        "#,
+        );
+        assert_eq!(
+            evaluator().evaluate(&cfg, "h", "rm -rf /").unwrap(),
+            Decision::Deny,
+        );
+    }
+
+    #[test]
+    fn named_def_ref_to_a_missing_table_is_an_error_at_evaluation() {
+        // Config load accepts the reference (no static check); the error
+        // surfaces only when the host's policy is actually evaluated, so
+        // that an unrelated typo does not break unrelated hosts.
+        let cfg = config(
+            r#"
+            [hosts.h]
+            hostname = "h"
+            purpose  = "p"
+            policy   = [{ def = "typo" }]
+        "#,
+        );
+        let result = evaluator().evaluate(&cfg, "h", "ls");
+        let err = result.expect_err("missing named def must error on evaluation");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("\"typo\""),
+            "diagnostic should name the missing ruleset: {message:?}"
+        );
+    }
+
+    #[test]
+    fn anonymous_def_and_named_def_can_coexist_on_the_same_host() {
+        // A host can mix its own inline `[hosts.X.def]` rules (referenced
+        // by bare `"def"`) with a shared `{ def = "shared" }` reference.
+        // The two are merged together with strictest-wins.
+        let cfg = config(
+            r#"
+            [hosts.h]
+            hostname = "h"
+            purpose  = "p"
+            policy   = ["def", { def = "shared" }]
+            [hosts.h.def]
+            deny = ["Bash(dd:*)"]
+
+            [def.shared]
+            ask = ["Bash(systemctl restart:*)"]
+        "#,
+        );
+        let ev = evaluator();
+        assert_eq!(ev.evaluate(&cfg, "h", "dd if=/dev/zero of=/dev/sda").unwrap(), Decision::Deny);
+        assert_eq!(
+            ev.evaluate(&cfg, "h", "systemctl restart nginx").unwrap(),
+            Decision::Ask,
+        );
     }
 }

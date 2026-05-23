@@ -93,6 +93,16 @@ policy   = ["def"]
 allow = ["Bash(systemctl status:*)"]
 ask   = ["Bash(systemctl restart:*)"]
 deny  = ["Bash(rm:*)"]
+
+# Shared rulesets, referenced by `{ def = "name" }` in any host's policy.
+[def.company-baseline]
+deny = ["Bash(rm -rf:*)", "Bash(dd:*)"]
+
+[hosts.staging-other]
+hostname = "10.0.2.9"
+user     = "deploy"
+purpose  = "Another staging host with shared baseline + extra restrict"
+policy   = [{ def = "company-baseline" }, "claude"]
 ```
 
 A host's `policy` is a set of gates composed strictest-wins:
@@ -100,13 +110,15 @@ A host's `policy` is a set of gates composed strictest-wins:
 | Gate | What it does |
 |---|---|
 | `free` | Allow without prompt. Use for hosts you trust the agent on. |
-| `def` | Apply the rules written inline under `[hosts.<alias>.def]`. |
+| `def` | Apply the rules written inline under `[hosts.<alias>.def]` (anonymous, host-local). |
+| `{ def = "name" }` | Apply the rules from a top-level `[def.<name>]` table, shared across hosts. Reference the same name from multiple hosts to reuse the ruleset. |
 | `claude` | Apply the rules from `~/.claude/settings.json` (user-level). |
 | `{ hook = "..." }` | Delegate to an external `PreToolUse` hook program. |
 
 A host's policy can mix any number of gates; the strictest decision wins
 (`deny > ask > allow`). An empty list — or omitting `policy` entirely — is
-equivalent to `free`.
+equivalent to `free`. Multiple `{ def = "name" }` references stack — the
+strictest of all the referenced rulesets wins.
 
 Each host must already be in `~/.ssh/known_hosts`, and your SSH agent must
 hold a key it accepts. `proxy_jump` is supported: list jump-host aliases

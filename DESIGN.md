@@ -82,7 +82,8 @@ result wins", precedence `deny > ask > allow`. The gates available are:
 | Gate | Decision source |
 |---|---|
 | `free` | Constant allow. Equivalent to an empty gate set. |
-| `def`  | Rules written inline under `[hosts.<alias>.def]` in the inventory. |
+| `def`  | Rules written inline under `[hosts.<alias>.def]` (host-local, anonymous). |
+| `{ def = "name" }` | Rules from a top-level `[def.<name>]` table — the same ruleset can be referenced from multiple hosts. |
 | `claude` | The `permissions.*` rules from `~/.claude/settings.json`. |
 | `{ hook = "..." }` | An external hook program, same protocol as Claude Code's `PreToolUse` hook. |
 
@@ -90,6 +91,19 @@ Mixing matters. A host that needs to consult both an external program and
 the user's own settings can do so by listing both gates; the stricter wins.
 A host that should never trigger an ask should be declared `free` —
 explicitly, so the intent is in the inventory.
+
+Named def references are the reuse path. A common baseline (`deny =
+["Bash(rm -rf:*)"]` etc.) lives in one `[def.company-baseline]` table and
+every host that wants it lists `{ def = "company-baseline" }`. Multiple
+references compose by the same strictest-wins rule, so layering — a
+shared baseline, then a per-environment restrict — falls out of the
+existing model with no new mechanism. Two references to the same name are
+idempotent (the same rule lines are merged a second time, with no
+semantic effect). A reference whose target is missing from the inventory
+is a deliberate evaluation-time error, not a config-load error: an
+unrelated typo in one ruleset name does not break unrelated hosts, and
+the diagnostic surfaces in the prompt the model sees when the gate would
+have fired.
 
 ### 3.2 Why the user's `~/.claude/settings.json` is honored
 
