@@ -42,6 +42,34 @@ pub enum OutputChannel {
     Stderr,
 }
 
+/// What kind of shell the remote runs commands under. Probed once per
+/// connection (right after the handshake) and cached for the connection's
+/// lifetime — `uname -s` then `ver` as a fallback resolves which it is.
+///
+/// The distinction only matters to file transfer: an exec call runs whatever
+/// command the caller wrote in whatever shell the remote provides, but the
+/// transfer engine has to construct shell commands itself (find, sha256sum,
+/// tar, rm) and those differ between POSIX and Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteOs {
+    /// Any Unix-like host (Linux, macOS, *BSD, ...). The transfer engine
+    /// assumes `find`, `sha256sum` or `shasum -a 256`, `tar`, `rm -rf`,
+    /// `mkdir -p`.
+    Posix,
+    /// Windows host running OpenSSH server (commands run under cmd.exe by
+    /// default). The transfer engine has its own command shapes built on
+    /// PowerShell, `tar.exe` (libarchive, shipped with Windows 10 1803+),
+    /// and `Get-FileHash`.
+    Windows,
+}
+
+/// A pooled SSH connection together with the probed OS of the remote.
+#[derive(Clone)]
+pub struct PooledConnection {
+    pub handle: Arc<client::Handle<StrictHostKey>>,
+    pub os: RemoteOs,
+}
+
 /// The result of running one remote command.
 #[derive(Debug, Clone)]
 pub struct ExecOutput {
@@ -59,7 +87,7 @@ pub struct ExecOutput {
 
 /// A pool of live SSH connections, keyed by host alias.
 pub struct ConnectionPool {
-    connections: Mutex<HashMap<String, Arc<client::Handle<StrictHostKey>>>>,
+    connections: Mutex<HashMap<String, PooledConnection>>,
     connector: SshConnector,
 }
 
@@ -104,6 +132,10 @@ impl ConnectionPool {
         exclude: &[String],
         timeout: Duration,
     ) -> Result<TransferStats> {
+        let pc = self.get_or_connect(config, host_alias).await?;
+        if matches!(pc.os, RemoteOs::Windows) {
+            bail!(unsupported_windows_message("get"));
+        }
         let channel = self.open_session(config, host_alias).await?;
         transfer::download(channel, remote_path, local_path, exclude, timeout).await
     }
@@ -121,6 +153,10 @@ impl ConnectionPool {
         exclude: &[String],
         timeout: Duration,
     ) -> Result<SyncResult> {
+        let pc = self.get_or_connect(config, host_alias).await?;
+        if matches!(pc.os, RemoteOs::Windows) {
+            bail!(unsupported_windows_message("sync_put"));
+        }
         if !local_path.is_dir() {
             bail!(
                 "sync_put requires the local source to be a directory; {} is not",
@@ -180,6 +216,10 @@ impl ConnectionPool {
         exclude: &[String],
         timeout: Duration,
     ) -> Result<SyncResult> {
+        let pc = self.get_or_connect(config, host_alias).await?;
+        if matches!(pc.os, RemoteOs::Windows) {
+            bail!(unsupported_windows_message("sync_get"));
+        }
         let probe = self.open_session(config, host_alias).await?;
         let remote_is_dir = transfer::remote_is_dir(probe, remote_path).await?;
         if !remote_is_dir {
@@ -241,6 +281,10 @@ impl ConnectionPool {
         exclude: &[String],
         timeout: Duration,
     ) -> Result<TransferStats> {
+        let pc = self.get_or_connect(config, host_alias).await?;
+        if matches!(pc.os, RemoteOs::Windows) {
+            bail!(unsupported_windows_message("put"));
+        }
         // The destination resolution depends on whether `remote_path` is an
         // existing directory, which only the remote can tell us. The probe
         // and the transfer each get their own channel — channels are
@@ -268,14 +312,14 @@ impl ConnectionPool {
         config: &HostsConfig,
         host_alias: &str,
     ) -> Result<Channel<client::Msg>> {
-        let handle = self.get_or_connect(config, host_alias).await?;
-        match open_channel(&handle).await {
+        let pc = self.get_or_connect(config, host_alias).await?;
+        match open_channel(&pc.handle).await {
             Ok(channel) => Ok(channel),
             Err(_) => {
                 // The pooled connection looks dead; drop it and reconnect once.
                 self.evict(host_alias).await;
-                let handle = self.get_or_connect(config, host_alias).await?;
-                open_channel(&handle)
+                let pc = self.get_or_connect(config, host_alias).await?;
+                open_channel(&pc.handle)
                     .await
                     .context("failed to open a channel after reconnecting")
             }
@@ -290,10 +334,12 @@ impl ConnectionPool {
         &self,
         config: &HostsConfig,
         host_alias: &str,
-    ) -> Result<Arc<client::Handle<StrictHostKey>>> {
-        let mut connections = self.connections.lock().await;
-        if let Some(handle) = connections.get(host_alias) {
-            return Ok(handle.clone());
+    ) -> Result<PooledConnection> {
+        {
+            let connections = self.connections.lock().await;
+            if let Some(pc) = connections.get(host_alias) {
+                return Ok(pc.clone());
+            }
         }
         let chain = resolve_chain(config, host_alias)?;
         // Bound the whole connection setup (TCP, handshake, auth, every hop):
@@ -306,8 +352,28 @@ impl ConnectionPool {
                     CONNECT_TIMEOUT.as_secs()
                 ),
             };
-        connections.insert(host_alias.to_string(), handle.clone());
-        Ok(handle)
+        // Probe the remote's shell family before sharing the connection.
+        // A concurrent caller racing on the same host can probe a second
+        // time; the eventual cached value is the same and the cost is small
+        // enough not to justify a per-host probe lock.
+        let os = probe_remote_os(&handle).await;
+        let pc = PooledConnection {
+            handle,
+            os,
+        };
+        let mut connections = self.connections.lock().await;
+        connections
+            .entry(host_alias.to_string())
+            .or_insert_with(|| pc.clone());
+        Ok(pc)
+    }
+
+    /// The probed OS of a host's pooled connection, opening one if needed.
+    /// Internal callers (transfer / sync) use this to branch on `Windows`
+    /// vs `Posix` shell-command shapes; missing-host or connect-error cases
+    /// surface as a regular error.
+    pub async fn remote_os(&self, config: &HostsConfig, host_alias: &str) -> Result<RemoteOs> {
+        Ok(self.get_or_connect(config, host_alias).await?.os)
     }
 }
 
@@ -373,4 +439,62 @@ async fn collect_output(channel: &mut Channel<client::Msg>, command: &str) -> Re
         chunks,
         exit_code,
     })
+}
+
+/// How long to wait for the OS probe to settle. Generous so that a slow
+/// remote on first connect doesn't get mislabelled; short enough that a
+/// genuinely broken host doesn't hold up the rest of the daemon.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Probe the remote's shell family. Best-effort: any failure resolves to
+/// `Posix` because that is the dominant case and the wrong guess only
+/// changes which clean error the user gets for a file transfer.
+///
+/// The probe runs two short commands at most. On POSIX, `uname -s` exits 0
+/// with `Linux` / `Darwin` / etc. — done. On Windows the same command is
+/// unknown to cmd.exe (errorlevel 9009 and a mojibake "not recognized"
+/// message), so the second probe tries `ver`, which prints
+/// `Microsoft Windows [Version ...]` from cmd.exe and nothing useful from
+/// a POSIX shell.
+async fn probe_remote_os(handle: &client::Handle<StrictHostKey>) -> RemoteOs {
+    if let Some(out) = probe_one(handle, "uname -s").await {
+        let trimmed = out.stdout.trim();
+        if out.exit_code == 0 && !trimmed.is_empty() {
+            return RemoteOs::Posix;
+        }
+    }
+    if let Some(out) = probe_one(handle, "ver").await
+        && out.stdout.contains("Microsoft Windows")
+    {
+        return RemoteOs::Windows;
+    }
+    // Default: assume POSIX. If we got here something unusual is happening
+    // (probe channel failed, weird shell, ...) but POSIX is the more
+    // permissive guess — transfer code will still error cleanly if the
+    // tar/find/sha256sum it tries to run isn't there.
+    RemoteOs::Posix
+}
+
+/// Run a single probe command and collect its short result, returning
+/// `None` for any kind of channel-level failure (so the caller falls
+/// through to the next probe attempt without erroring out the whole
+/// connection).
+async fn probe_one(handle: &client::Handle<StrictHostKey>, command: &str) -> Option<ExecOutput> {
+    let mut channel = open_channel(handle).await.ok()?;
+    tokio::time::timeout(PROBE_TIMEOUT, collect_output(&mut channel, command))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+}
+
+/// Friendly message for the four transfer tools when the target is a
+/// Windows remote that hasn't been ported yet. Names the tool the caller
+/// invoked so the model knows which call to retry through other means.
+fn unsupported_windows_message(tool: &str) -> String {
+    format!(
+        "{tool} is not yet supported against Windows remotes — the daemon's transfer engine \
+         only knows the POSIX shell commands (find, sha256sum, tar, rm). Use exec to drive a \
+         manual transfer for now (e.g. PowerShell + tar.exe), or wait for the Windows transport \
+         to land."
+    )
 }
