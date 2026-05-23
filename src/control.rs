@@ -131,8 +131,7 @@ async fn process(
 
     let tool = request.tool_name.as_deref().unwrap_or_default();
     let (decision, summary) = match tool {
-        "mcp__ssh__get_file" | "mcp__ssh__put_file" | "mcp__ssh__sync_get"
-        | "mcp__ssh__sync_put" => {
+        "mcp__ssh__get" | "mcp__ssh__put" | "mcp__ssh__sync_get" | "mcp__ssh__sync_put" => {
             let remote = request
                 .tool_input
                 .remote_path
@@ -144,7 +143,7 @@ async fn process(
                 .clone()
                 .context("the transfer request carries no local_path")?;
             let exclude = request.tool_input.exclude.clone();
-            let direction = if matches!(tool, "mcp__ssh__get_file" | "mcp__ssh__sync_get") {
+            let direction = if matches!(tool, "mcp__ssh__get" | "mcp__ssh__sync_get") {
                 TransferDir::Get
             } else {
                 TransferDir::Put

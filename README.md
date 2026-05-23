@@ -32,8 +32,8 @@ must be an alias from `list_hosts`.
 |---|---|
 | `list_hosts` | Returns each host's alias, purpose, tags, and policy kinds — **never** an address, user, or credential. Read-only, ungated. |
 | `exec` | Runs a shell command on a host and returns the exit code with scoped stdout/stderr. Requires an `op` (`tail` / `head` / `grep`) so output stays deliberately scoped; the full streams are kept in the per-session trace buffer for re-inspection. |
-| `get_file` | Downloads a file or directory. If the local destination is an existing directory the entry lands inside it under its remote base name (the `cp` rule); otherwise it replaces the destination. Returns a byte count. |
-| `put_file` | Symmetric: uploads a local file or directory. If the remote destination is an existing directory the entry lands inside; otherwise it replaces. Returns a byte count. |
+| `get` | Downloads a file or directory. If the local destination is an existing directory the entry lands inside it under its remote base name (the `cp` rule); otherwise it replaces the destination. Returns a byte count. |
+| `put` | Symmetric: uploads a local file or directory. If the remote destination is an existing directory the entry lands inside; otherwise it replaces. Returns a byte count. |
 | `sync_get` / `sync_put` | Mirror a directory in either direction. Both paths are treated as roots: files in the destination that are absent from the source are deleted; files matching by sha-256 are skipped. Returns per-op counts. |
 | `trace` | Re-inspects the full detail of a recent tool call from a per-session ring buffer (depth 5, 10 MiB per entry). Requires an `op`. Transfer entries come back as `<verb> <path>` lines so they grep cleanly. |
 
@@ -68,8 +68,8 @@ Describe your hosts in `~/.ssh/ssh-mcp.toml`:
 # per host with an exec_timeout_secs key under [hosts.<alias>].
 [defaults]
 exec_timeout_secs = 600
-# Globs put_file / sync_put leave out of an upload, matched against any
-# name in the tree. The get_file / sync_get exclude is set per host, with
+# Globs put / sync_put leave out of an upload, matched against any
+# name in the tree. The get / sync_get exclude is set per host, with
 # an exclude key under a host.
 exclude = ["target", ".git", "node_modules"]
 
@@ -155,7 +155,7 @@ Then add the PreToolUse hook to `~/.claude/settings.json`:
 {
   "hooks": {
     "PreToolUse": [
-      { "matcher": "mcp__ssh__(exec|get_file|put_file|sync_get|sync_put)",
+      { "matcher": "mcp__ssh__(exec|get|put|sync_get|sync_put)",
         "hooks": [ { "type": "command", "command": "<path>/ssh-mcp hook" } ] }
     ]
   }

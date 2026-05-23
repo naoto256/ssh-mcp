@@ -123,15 +123,15 @@ the user settings for each one. The single Decision the hook returns is
 strictest-wins across every entry: one Deny ruins the transfer, one Ask
 covers the whole change set in one prompt.
 
-`get_file` and `put_file` keep their path-level gate: the cp-merge rule
+`get` and `put` keep their path-level gate: the cp-merge rule
 means they target one location, and the coarse question already captures
 intent.
 
 ## 4. File transfer
 
-### 4.1 cp-merge semantics on `get_file` / `put_file`
+### 4.1 cp-merge semantics on `get` / `put`
 
-`get_file foo.txt /inbox/` and `get_file foo.txt /inbox/foo.txt` are
+`get foo.txt /inbox/` and `get foo.txt /inbox/foo.txt` are
 different in standard Unix:
 
 - the first places `foo.txt` inside `/inbox/` (existing directory)
@@ -139,7 +139,7 @@ different in standard Unix:
 
 `cp` and `rsync` both follow this rule. Earlier versions of ssh-mcp did
 not — they always replaced the target — and the failure mode was severe:
-`get_file remote=/tmp/.claude local=~` would have replaced the home
+`get remote=/tmp/.claude local=~` would have replaced the home
 directory wholesale with the downloaded entry.
 
 The current rule is: if the destination is an existing directory, the
@@ -193,8 +193,8 @@ relative paths.
 
 ### 4.5 Result shape: counts in the tool, lines in the trace
 
-The tool result for a transfer is the byte count (for `get_file` /
-`put_file`) or per-op counts (for `sync_*`). It deliberately does **not**
+The tool result for a transfer is the byte count (for `get` /
+`put`) or per-op counts (for `sync_*`). It deliberately does **not**
 contain the per-file list, even when only a handful of files moved.
 Every line of tool output is context the model has to spend reading.
 

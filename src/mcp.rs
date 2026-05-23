@@ -1,9 +1,11 @@
 //! The MCP server the daemon runs over each UDS connection.
 //!
 //! `list_hosts` shows the curated inventory — purpose and policy only, never
-//! an address or credentials. `exec` runs a command. `get_file` / `put_file`
-//! transfer files and directories. `trace` retrieves the full detail of a
-//! recent call from a per-session ring buffer, since the other tools return
+//! an address or credentials. `exec` runs a command. `get` and `put` transfer
+//! a single file or directory (`cp` semantics on the destination); `sync_get`
+//! and `sync_put` mirror a directory in either direction (per-entry policy
+//! against the change set). `trace` retrieves the full detail of a recent
+//! call from a per-session ring buffer, since the other tools return
 //! summarized results to keep the model's context lean. Policy is not
 //! evaluated here: by the time a call reaches the daemon the hook has
 //! already approved it.
@@ -97,7 +99,8 @@ pub struct TraceParams {
 /// The result of `trace`.
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct TraceResult {
-    /// The tool whose call this trace refers to (`"exec"`, `"get_file"`, ...).
+    /// The tool whose call this trace refers to (`"exec"`, `"get"`, `"put"`,
+    /// `"sync_get"`, `"sync_put"`).
     pub tool: String,
     /// Human-readable parameter summary of the original call.
     pub params: String,
@@ -116,9 +119,9 @@ pub struct TraceResult {
     pub truncated: bool,
 }
 
-/// Arguments to `get_file`.
+/// Arguments to `get`.
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct GetFileParams {
+pub struct GetParams {
     /// The host alias, as returned by `list_hosts`.
     pub host: String,
     /// The path on the host to download — absolute, or relative to the login
@@ -133,15 +136,55 @@ pub struct GetFileParams {
     pub exclude: Vec<String>,
 }
 
-/// Arguments to `put_file`.
+/// Arguments to `put`.
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PutFileParams {
+pub struct PutParams {
     /// The host alias, as returned by `list_hosts`.
     pub host: String,
     /// The local path to upload — absolute, or starting with `~/`.
     pub local_path: String,
     /// Where to place it on the host — absolute, or relative to the login
     /// directory, without a leading `~`.
+    pub remote_path: String,
+    /// Optional glob patterns to skip, added to the inventory's configured
+    /// exclude — a pattern matches a file or directory name anywhere in the
+    /// tree, e.g. "target", ".git", "*.log".
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+/// Arguments to `sync_get`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SyncGetParams {
+    /// The host alias, as returned by `list_hosts`.
+    pub host: String,
+    /// The directory on the host to mirror down — absolute, or relative to
+    /// the login directory, without a leading `~`. Must be an existing
+    /// directory.
+    pub remote_path: String,
+    /// The local directory to mirror into — absolute, or starting with `~/`.
+    /// Created if missing. Files inside this directory that are absent from
+    /// the remote source are deleted.
+    pub local_path: String,
+    /// Optional glob patterns to skip, added to the host's configured
+    /// exclude — a pattern matches a file or directory name anywhere in the
+    /// tree, e.g. "target", ".git", "*.log".
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+/// Arguments to `sync_put`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SyncPutParams {
+    /// The host alias, as returned by `list_hosts`.
+    pub host: String,
+    /// The local directory to mirror up — absolute, or starting with `~/`.
+    /// Must be an existing directory.
+    pub local_path: String,
+    /// The remote directory to mirror into — absolute, or relative to the
+    /// login directory, without a leading `~`. Created if missing. Files
+    /// inside this directory that are absent from the local source are
+    /// deleted.
     pub remote_path: String,
     /// Optional glob patterns to skip, added to the inventory's configured
     /// exclude — a pattern matches a file or directory name anywhere in the
@@ -331,14 +374,14 @@ impl SshMcpServer {
     }
 
     #[tool(
-        name = "get_file",
-        description = "Download a file or directory from a host to the local machine. remote_path is on the host (absolute, or relative to the login directory — no leading ~); local_path is where it lands locally (absolute, or starting with ~/). If local_path is an existing directory the entry is placed inside it under its remote base name; otherwise local_path is replaced. Files and directories are both supported. The host's configured exclude patterns are always skipped; pass exclude to add more globs for this call. Result is a byte count only — the full per-file detail is not returned; call trace if you need it."
+        name = "get",
+        description = "Download a file or directory from a host to the local machine. Files and directories are both supported (the tool name omits 'file' because the same call covers both). remote_path is on the host (absolute, or relative to the login directory — no leading ~); local_path is where it lands locally (absolute, or starting with ~/). If local_path is an existing directory the entry is placed inside it under its remote base name; otherwise local_path is replaced. The host's configured exclude patterns are always skipped; pass exclude to add more globs for this call. Result is a byte count only — the full per-file detail is not returned; call trace if you need it."
     )]
-    async fn get_file(
+    async fn get(
         &self,
-        params: Parameters<GetFileParams>,
+        params: Parameters<GetParams>,
     ) -> Result<Json<TransferResult>, String> {
-        let GetFileParams {
+        let GetParams {
             host,
             remote_path,
             local_path,
@@ -396,9 +439,9 @@ impl SshMcpServer {
     )]
     async fn sync_get(
         &self,
-        params: Parameters<GetFileParams>,
+        params: Parameters<SyncGetParams>,
     ) -> Result<Json<SyncResult>, String> {
-        let GetFileParams {
+        let SyncGetParams {
             host,
             remote_path,
             local_path,
@@ -461,9 +504,9 @@ impl SshMcpServer {
     )]
     async fn sync_put(
         &self,
-        params: Parameters<PutFileParams>,
+        params: Parameters<SyncPutParams>,
     ) -> Result<Json<SyncResult>, String> {
-        let PutFileParams {
+        let SyncPutParams {
             host,
             local_path,
             remote_path,
@@ -558,14 +601,14 @@ impl SshMcpServer {
     }
 
     #[tool(
-        name = "put_file",
-        description = "Upload a local file or directory to a host. local_path is the local source (absolute, or starting with ~/); remote_path is where it lands on the host (absolute, or relative to the login directory — no leading ~). If remote_path is an existing directory the entry is placed inside it under its local base name; otherwise remote_path is replaced. Files and directories are both supported. The inventory's configured exclude patterns (e.g. build output) are always skipped; pass exclude to add more globs for this call. Result is a byte count only — the full per-file detail is not returned; call trace if you need it."
+        name = "put",
+        description = "Upload a local file or directory to a host. Files and directories are both supported (the tool name omits 'file' because the same call covers both). local_path is the local source (absolute, or starting with ~/); remote_path is where it lands on the host (absolute, or relative to the login directory — no leading ~). If remote_path is an existing directory the entry is placed inside it under its local base name; otherwise remote_path is replaced. The inventory's configured exclude patterns (e.g. build output) are always skipped; pass exclude to add more globs for this call. Result is a byte count only — the full per-file detail is not returned; call trace if you need it."
     )]
-    async fn put_file(
+    async fn put(
         &self,
-        params: Parameters<PutFileParams>,
+        params: Parameters<PutParams>,
     ) -> Result<Json<TransferResult>, String> {
-        let PutFileParams {
+        let PutParams {
             host,
             local_path,
             remote_path,
