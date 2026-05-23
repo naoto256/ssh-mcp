@@ -234,7 +234,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "exec",
-        description = "Run a shell command on a host from list_hosts and return its exit code with op-scoped stdout/stderr. Each call is stateless — no working directory or shell state carries to the next call, so use 'cd /path && cmd' when a directory matters. The op parameter is required: pass tail/head/grep so the returned slice is deliberately scoped instead of dumping the whole stream into context. The full stdout/stderr is retained in the per-session trace buffer; call trace to re-scope. Each call has a time limit (default 600s); for a longer-running job, start it detached and poll for completion — e.g. \"nohup sh -c 'long-cmd; echo $? > /tmp/job.rc' > /tmp/job.out 2>&1 &\", then read /tmp/job.rc on later calls."
+        description = "Run a shell command on a host from list_hosts and return its exit code with op-scoped stdout/stderr. Each call is stateless — no working directory or shell state carries to the next call, so use 'cd /path && cmd' when a directory matters. The op parameter is required: pass tail/head/grep so the returned slice is deliberately scoped. **Do not also pipe through tail/head/grep in the shell command** — op is the canonical scope, and the full unscoped stdout/stderr is retained in the per-session trace buffer so you can re-scope through `trace` later. Double-scoping defeats the trace path: it throws away the very output you might want to inspect with a different filter. Each call has a time limit (default 600s); for a longer-running job, start it detached and poll for completion — e.g. \"nohup sh -c 'long-cmd; echo $? > /tmp/job.rc' > /tmp/job.out 2>&1 &\", then read /tmp/job.rc on later calls."
     )]
     async fn exec(&self, params: Parameters<ExecParams>) -> Result<Json<ExecResult>, String> {
         let ExecParams { host, command, op } = params.0;
@@ -332,7 +332,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "get_file",
-        description = "Download a file or directory from a host to the local machine. remote_path is on the host (absolute, or relative to the login directory — no leading ~); local_path is where it lands locally (absolute, or starting with ~/) and is replaced if it already exists. Files and directories are both supported. The host's configured exclude patterns are always skipped; pass exclude to add more globs for this call."
+        description = "Download a file or directory from a host to the local machine. remote_path is on the host (absolute, or relative to the login directory — no leading ~); local_path is where it lands locally (absolute, or starting with ~/). If local_path is an existing directory the entry is placed inside it under its remote base name; otherwise local_path is replaced. Files and directories are both supported. The host's configured exclude patterns are always skipped; pass exclude to add more globs for this call. Result is a byte count only — the full per-file detail is not returned; call trace if you need it."
     )]
     async fn get_file(
         &self,
@@ -392,7 +392,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "sync_get",
-        description = "Mirror a remote directory into a local location. Files on the local side that are absent from the remote source are deleted; files that match by sha256 are skipped. The local destination follows the same cp/rsync rule as get_file (place inside an existing directory, otherwise take its name). The remote source must be a directory. Returns per-op counts; call trace for the full per-file list. The host's configured exclude patterns are always skipped; pass exclude to add more globs for this call."
+        description = "Mirror a remote directory into a local location. Both paths are treated as roots — files on the local side that are absent from the remote source are deleted; files matching by sha256 are skipped. The remote source must be a directory; the local destination is created if missing. Returns per-op counts only (created/updated/deleted/skipped). **The per-file list is not in the result** — to see which files moved, call `trace` (the touched files come back as `<verb> <path>` lines; pass `include_skipped` to also see the hash-matched ones). The host's configured exclude patterns are always skipped; pass exclude to add more globs for this call."
     )]
     async fn sync_get(
         &self,
@@ -457,7 +457,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "sync_put",
-        description = "Mirror a local directory onto a host. Files on the remote that are absent from the local source are deleted; files that match by sha256 are skipped. The remote destination follows the same cp/rsync rule as put_file. The local source must be a directory. Returns per-op counts; call trace for the full per-file list. The inventory's configured exclude patterns are always skipped; pass exclude to add more globs for this call."
+        description = "Mirror a local directory onto a host. Both paths are treated as roots — files on the remote that are absent from the local source are deleted; files matching by sha256 are skipped. The local source must be a directory; the remote destination is created if missing. Returns per-op counts only (created/updated/deleted/skipped). **The per-file list is not in the result** — to see which files moved, call `trace` (the touched files come back as `<verb> <path>` lines; pass `include_skipped` to also see the hash-matched ones). The inventory's configured exclude patterns are always skipped; pass exclude to add more globs for this call."
     )]
     async fn sync_put(
         &self,
@@ -559,7 +559,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "put_file",
-        description = "Upload a local file or directory to a host. local_path is the local source (absolute, or starting with ~/); remote_path is where it lands on the host (absolute, or relative to the login directory — no leading ~) and is replaced if it already exists. Files and directories are both supported. The inventory's configured exclude patterns (e.g. build output) are always skipped; pass exclude to add more globs for this call."
+        description = "Upload a local file or directory to a host. local_path is the local source (absolute, or starting with ~/); remote_path is where it lands on the host (absolute, or relative to the login directory — no leading ~). If remote_path is an existing directory the entry is placed inside it under its local base name; otherwise remote_path is replaced. Files and directories are both supported. The inventory's configured exclude patterns (e.g. build output) are always skipped; pass exclude to add more globs for this call. Result is a byte count only — the full per-file detail is not returned; call trace if you need it."
     )]
     async fn put_file(
         &self,
