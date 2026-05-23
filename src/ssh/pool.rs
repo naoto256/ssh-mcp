@@ -32,11 +32,26 @@ pub struct SyncResult {
     pub change_set: crate::changeset::ChangeSet,
 }
 
+/// Which output stream a remote-command chunk belongs to. Used to preserve
+/// the arrival order across stdout and stderr so the trace buffer can
+/// reconstruct line-level interleaving — the natural reading order of
+/// progress lines and the warnings that landed between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputChannel {
+    Stdout,
+    Stderr,
+}
+
 /// The result of running one remote command.
 #[derive(Debug, Clone)]
 pub struct ExecOutput {
     pub stdout: String,
     pub stderr: String,
+    /// Raw byte chunks in the order they arrived from the remote, tagged by
+    /// their stream. Splitting these into lines and emitting whichever side
+    /// completed a line first reproduces the temporal interleaving the user
+    /// would have seen on a real terminal.
+    pub chunks: Vec<(OutputChannel, Vec<u8>)>,
     /// The remote exit code, or `-1` if the command was signalled or the
     /// channel closed without reporting one.
     pub exit_code: i32,
@@ -334,12 +349,19 @@ async fn collect_output(channel: &mut Channel<client::Msg>, command: &str) -> Re
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
+    let mut chunks: Vec<(OutputChannel, Vec<u8>)> = Vec::new();
     let mut exit_code = -1;
 
     while let Some(message) = channel.wait().await {
         match message {
-            ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
-            ChannelMsg::ExtendedData { data, ext: 1 } => stderr.extend_from_slice(&data),
+            ChannelMsg::Data { data } => {
+                stdout.extend_from_slice(&data);
+                chunks.push((OutputChannel::Stdout, data.to_vec()));
+            }
+            ChannelMsg::ExtendedData { data, ext: 1 } => {
+                stderr.extend_from_slice(&data);
+                chunks.push((OutputChannel::Stderr, data.to_vec()));
+            }
             ChannelMsg::ExitStatus { exit_status } => exit_code = exit_status as i32,
             _ => {}
         }
@@ -348,6 +370,7 @@ async fn collect_output(channel: &mut Channel<client::Msg>, command: &str) -> Re
     Ok(ExecOutput {
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        chunks,
         exit_code,
     })
 }

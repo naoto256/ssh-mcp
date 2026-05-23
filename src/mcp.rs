@@ -27,7 +27,9 @@ use crate::audit::AuditLog;
 use crate::config::HostsConfig;
 use crate::pathnorm;
 use crate::ssh::ConnectionPool;
-use crate::trace::{DEFAULT_TRACE_DEPTH, Op, TraceBuffer, TraceEntry};
+use crate::trace::{
+    Channel, DEFAULT_TRACE_DEPTH, Op, Stream, TraceBuffer, TraceEntry, TraceLine, chunks_to_lines,
+};
 
 /// A host as shown to the model: what it is for and how it is gated, never
 /// its address or credentials.
@@ -87,9 +89,17 @@ pub struct TraceParams {
     /// that, and so on. Defaults to the most recent.
     #[serde(default)]
     pub index: u32,
-    /// Output scope, applied to the recorded body before it is returned.
-    /// At least one of `grep`, `head`, or `tail` is required.
+    /// Output scope, applied to the recorded body. At least one of `grep`,
+    /// `head`, or `tail` is required. `grep` matches against the raw line
+    /// text — never against the `stdout:` / `stderr:` prefix — so a pattern
+    /// that worked on the original `exec` result keeps working here.
     pub op: Op,
+    /// Which channels of an `exec` entry to surface. Defaults to `both`
+    /// (channel-prefixed output, arrival order preserved). Set to `stdout`
+    /// or `stderr` to look at one channel with no prefix. Ignored for
+    /// transfer entries — their lines pass through every selector.
+    #[serde(default)]
+    pub stream: Stream,
     /// For transfer entries, mix the skipped (hash-matched) paths into the
     /// body before the `op` is applied. Ignored for `exec` entries.
     #[serde(default)]
@@ -106,13 +116,23 @@ pub struct TraceResult {
     pub params: String,
     /// Human-readable result summary of the original call.
     pub summary: String,
-    /// Body lines kept after the `op` was applied. For `exec` each line is
-    /// channel-tagged (`"stdout: ..."` / `"stderr: ..."`); for transfers each
-    /// line is op-tagged (`"create <path>"` / `"update <path>"` /
-    /// `"delete <path>"` / `"skip <path>"`).
+    /// Body lines kept after the `op` was applied. For `exec` entries with
+    /// `stream = "both"` (the default) each line is channel-prefixed
+    /// (`"stdout: ..."` / `"stderr: ..."`) and the arrival order is
+    /// preserved; for `stream = "stdout"` or `"stderr"` the matching lines
+    /// are returned bare. For transfer entries the body is op-tagged
+    /// (`"create <path>"` / `"update <path>"` / `"delete <path>"` /
+    /// `"skip <path>"`).
     pub lines: Vec<String>,
-    /// Total number of body lines available before the `op` filtered any
-    /// out. `lines.len()` is the kept count.
+    /// Total stdout lines in the recorded entry, before any filter. Zero
+    /// for transfer entries.
+    pub stdout_lines: u32,
+    /// Total stderr lines in the recorded entry, before any filter. Zero
+    /// for transfer entries.
+    pub stderr_lines: u32,
+    /// Total lines available after the stream selector filtered the body
+    /// but before the `op` filtered any out. `lines.len()` is the kept
+    /// count.
     pub total_lines: u32,
     /// Set when the originating tool's body exceeded the per-entry byte cap
     /// and the buffer dropped the tail.
@@ -304,16 +324,11 @@ impl SshMcpServer {
         let stdout_all: Vec<String> = output.stdout.lines().map(String::from).collect();
         let stderr_all: Vec<String> = output.stderr.lines().map(String::from).collect();
 
-        // The trace buffer holds the channel-tagged full body — the
-        // unfiltered record the model can re-scope later — independently of
-        // what the op chooses to surface this turn.
-        let mut body = Vec::with_capacity(stdout_all.len() + stderr_all.len());
-        for line in &stdout_all {
-            body.push(format!("stdout: {line}"));
-        }
-        for line in &stderr_all {
-            body.push(format!("stderr: {line}"));
-        }
+        // The trace buffer holds the channel-tagged body in arrival order:
+        // splitting the raw chunks gives the natural reading order of
+        // progress lines and the warnings that landed between them, which
+        // is what makes a long build log readable through `trace`.
+        let trace_lines = chunks_to_lines(&output.chunks);
         let trace_summary = format!(
             "exit={} stdout_lines={} stderr_lines={}",
             output.exit_code,
@@ -325,7 +340,7 @@ impl SshMcpServer {
                 tool: "exec".into(),
                 params: format!("host={host:?} command={command:?}"),
                 summary: trace_summary,
-                lines: body,
+                lines: trace_lines,
                 skipped: vec![],
                 truncated: false,
             })
@@ -344,12 +359,13 @@ impl SshMcpServer {
 
     #[tool(
         name = "trace",
-        description = "Re-inspect the full detail of a recent tool call on this MCP session. The other tools return slim summaries to keep context lean; trace retrieves the body that backed them. The op parameter is required (tail/head/grep, with grep applied before head/tail) so output stays scoped. index selects which past call to look at: 0 is the most recent (default), 1 the one before that, up to 4 — the buffer holds the last 5 calls per session. For transfer entries, set include_skipped to mix the hash-matched (skipped) paths into the body. trace itself is not recorded."
+        description = "Re-inspect the full detail of a recent tool call on this MCP session. The other tools return slim summaries to keep context lean; trace retrieves the body that backed them. The op parameter is required (tail/head/grep, with grep applied before head/tail) so output stays scoped. `grep` matches the raw line text — the `stdout:` / `stderr:` prefix is never matched against — so a pattern that worked on the original `exec` result keeps working here. `stream` (default `both`) selects which channels of an `exec` entry to show: `both` prefixes each line with `stdout: ` or `stderr: ` and preserves the arrival order; `stdout` or `stderr` returns only that channel with no prefix. `stream` is ignored for transfer entries. `index` selects which past call to look at: 0 is the most recent (default), 1 the one before that, up to 4 — the buffer holds the last 5 calls per session. For transfer entries, set `include_skipped` to mix the hash-matched (skipped) paths into the body. trace itself is not recorded."
     )]
     async fn trace(&self, params: Parameters<TraceParams>) -> Result<Json<TraceResult>, String> {
         let TraceParams {
             index,
             op,
+            stream,
             include_skipped,
         } = params.0;
         op.validate()?;
@@ -358,16 +374,60 @@ impl SshMcpServer {
             .fetch(index as usize)
             .await
             .ok_or_else(|| format!("no trace entry at index {index}"))?;
-        let mut body = entry.lines.clone();
+
+        // Raw per-channel counts of the recorded entry (before any filter).
+        // These match the exec result's stdout_lines / stderr_lines so the
+        // model has the same anchor whether it is reading the original
+        // result or the trace.
+        let stdout_lines_raw = entry
+            .lines
+            .iter()
+            .filter(|l| l.channel == Channel::Stdout)
+            .count() as u32;
+        let stderr_lines_raw = entry
+            .lines
+            .iter()
+            .filter(|l| l.channel == Channel::Stderr)
+            .count() as u32;
+
+        // Stream filter: keep lines whose channel matches the selector.
+        // Transfer lines always pass through.
+        let mut body: Vec<TraceLine> = entry
+            .lines
+            .iter()
+            .filter(|l| l.channel.passes(stream))
+            .cloned()
+            .collect();
+        // Skipped paths are channel-less; treat them as Transfer for output
+        // formatting purposes (no prefix).
         if include_skipped {
-            body.extend(entry.skipped.iter().cloned());
+            body.extend(entry.skipped.iter().map(|s| TraceLine {
+                channel: Channel::Transfer,
+                text: s.clone(),
+            }));
         }
-        let (lines, total_lines) = op.apply(body)?;
+        let total_lines = body.len() as u32;
+
+        let kept = op.apply_tagged(body)?;
+        // Output formatting: prefix exec channels only when `stream = both`
+        // (otherwise the prefix is unambiguous from the parameter the
+        // caller already chose).
+        let lines: Vec<String> = kept
+            .into_iter()
+            .map(|line| match (line.channel, stream) {
+                (Channel::Stdout, Stream::Both) => format!("stdout: {}", line.text),
+                (Channel::Stderr, Stream::Both) => format!("stderr: {}", line.text),
+                _ => line.text,
+            })
+            .collect();
+
         Ok(Json(TraceResult {
             tool: entry.tool,
             params: entry.params,
             summary: entry.summary,
             lines,
+            stdout_lines: stdout_lines_raw,
+            stderr_lines: stderr_lines_raw,
             total_lines,
             truncated: entry.truncated,
         }))
@@ -573,14 +633,20 @@ impl SshMcpServer {
         local: &str,
         sr: &crate::ssh::SyncResult,
     ) {
+        // Transfer lines have no stdout/stderr distinction; tag them as
+        // Transfer so the stream selector in `trace` passes them through
+        // unchanged regardless of which channel the caller asked for.
         let mut lines = Vec::new();
         let mut skipped = Vec::new();
         for entry in &sr.change_set.entries {
-            let line = format!("{} {}", entry.op.verb(), entry.rel_path.display());
+            let text = format!("{} {}", entry.op.verb(), entry.rel_path.display());
             if entry.op == crate::changeset::ChangeOp::Skip {
-                skipped.push(line);
+                skipped.push(text);
             } else {
-                lines.push(line);
+                lines.push(TraceLine {
+                    channel: Channel::Transfer,
+                    text,
+                });
             }
         }
         let counts = sr.change_set.counts();
