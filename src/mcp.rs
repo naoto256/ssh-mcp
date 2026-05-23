@@ -71,6 +71,11 @@ pub struct GetFileParams {
     pub remote_path: String,
     /// Where to place it locally — absolute, or starting with `~/`.
     pub local_path: String,
+    /// Optional glob patterns to skip, added to the host's configured
+    /// exclude — a pattern matches a file or directory name anywhere in the
+    /// tree, e.g. "target", ".git", "*.log".
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// Arguments to `put_file`.
@@ -83,6 +88,11 @@ pub struct PutFileParams {
     /// Where to place it on the host — absolute, or relative to the login
     /// directory, without a leading `~`.
     pub remote_path: String,
+    /// Optional glob patterns to skip, added to the inventory's configured
+    /// exclude — a pattern matches a file or directory name anywhere in the
+    /// tree, e.g. "target", ".git", "*.log".
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// The result of a transfer.
@@ -185,7 +195,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "get_file",
-        description = "Download a file or directory from a host to the local machine. remote_path is on the host (absolute, or relative to the login directory — no leading ~); local_path is where it lands locally (absolute, or starting with ~/) and is replaced if it already exists. Files and directories are both supported; the host's configured exclude patterns are skipped."
+        description = "Download a file or directory from a host to the local machine. remote_path is on the host (absolute, or relative to the login directory — no leading ~); local_path is where it lands locally (absolute, or starting with ~/) and is replaced if it already exists. Files and directories are both supported. The host's configured exclude patterns are always skipped; pass exclude to add more globs for this call."
     )]
     async fn get_file(
         &self,
@@ -195,23 +205,26 @@ impl SshMcpServer {
             host,
             remote_path,
             local_path,
+            exclude,
         } = params.0;
         let config = HostsConfig::load(&self.config_path).map_err(|e| format!("{e:#}"))?;
-        // The download exclude is per-host: the remote tree is host-specific.
-        let (timeout, exclude) = match config.host(&host) {
+        // The download exclude is per-host (the remote tree is host-specific);
+        // the tool argument adds more for this call.
+        let (timeout, mut excludes) = match config.host(&host) {
             Some(entry) => (
                 Duration::from_secs(config.exec_timeout_secs(entry)),
                 entry.exclude.clone(),
             ),
             None => return Err(format!("unknown host {host:?}")),
         };
+        excludes.extend(exclude);
         // Normalize exactly as the policy gate did, so the two cannot disagree.
         let remote = pathnorm::normalize_remote(&remote_path).map_err(|e| format!("{e:#}"))?;
         let local = pathnorm::normalize_local(&local_path).map_err(|e| format!("{e:#}"))?;
 
         let result = self
             .pool
-            .get_file(&config, &host, &remote, &local, &exclude, timeout)
+            .get_file(&config, &host, &remote, &local, &excludes, timeout)
             .await;
         let local_display = local.to_string_lossy();
         match &result {
@@ -242,7 +255,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "put_file",
-        description = "Upload a local file or directory to a host. local_path is the local source (absolute, or starting with ~/); remote_path is where it lands on the host (absolute, or relative to the login directory — no leading ~) and is replaced if it already exists. Files and directories are both supported; the inventory's configured exclude patterns (e.g. build output) are skipped."
+        description = "Upload a local file or directory to a host. local_path is the local source (absolute, or starting with ~/); remote_path is where it lands on the host (absolute, or relative to the login directory — no leading ~) and is replaced if it already exists. Files and directories are both supported. The inventory's configured exclude patterns (e.g. build output) are always skipped; pass exclude to add more globs for this call."
     )]
     async fn put_file(
         &self,
@@ -252,6 +265,7 @@ impl SshMcpServer {
             host,
             local_path,
             remote_path,
+            exclude,
         } = params.0;
         let config = HostsConfig::load(&self.config_path).map_err(|e| format!("{e:#}"))?;
         let timeout = match config.host(&host) {
@@ -261,18 +275,14 @@ impl SshMcpServer {
         let remote = pathnorm::normalize_remote(&remote_path).map_err(|e| format!("{e:#}"))?;
         let local = pathnorm::normalize_local(&local_path).map_err(|e| format!("{e:#}"))?;
 
-        // The upload exclude is global: what to leave out of an upload is a
-        // property of the source tree, not the destination host.
+        // The upload exclude is global (the source tree's property, not the
+        // host's); the tool argument adds more for this call.
+        let mut excludes = config.defaults.exclude.clone();
+        excludes.extend(exclude);
+
         let result = self
             .pool
-            .put_file(
-                &config,
-                &host,
-                &local,
-                &remote,
-                &config.defaults.exclude,
-                timeout,
-            )
+            .put_file(&config, &host, &local, &remote, &excludes, timeout)
             .await;
         let local_display = local.to_string_lossy();
         match &result {
