@@ -273,6 +273,120 @@ pub fn remote_paths_walk_command_safe(root: &str, name_only_excludes: &[String])
     format!("if [ -d {} ]; then {cmd}; fi", shell_quote(root))
 }
 
+/// Windows counterpart of [`remote_walk_command_safe`]: PowerShell
+/// recursive enumeration that emits `<sha256 hex>  <relpath>` per line,
+/// the same shape the POSIX `sha256sum` output uses. Empty stdout when
+/// the root does not exist, so the diff just sees no entries on that
+/// side. Excludes are matched per-segment with `-like` wildcards so the
+/// same `target` / `*.log` / `.git` patterns the inventory already uses
+/// work without translation.
+pub fn remote_walk_command_safe_windows(root: &str, name_only_excludes: &[String]) -> String {
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'\n\
+         $root = '{root}'\n\
+         if (-not (Test-Path -LiteralPath $root -PathType Container)) {{ return }}\n\
+         $excludes = @({excludes})\n\
+         $prefix = $root.TrimEnd('\\').Length + 1\n\
+         Get-ChildItem -LiteralPath $root -File -Recurse -Force | Where-Object {{\n\
+           $segments = $_.FullName.Substring($prefix).Split([char[]]@('\\','/'))\n\
+           $skip = $false\n\
+           foreach ($seg in $segments) {{\n\
+             foreach ($e in $excludes) {{ if ($seg -like $e) {{ $skip = $true; break }} }}\n\
+             if ($skip) {{ break }}\n\
+           }}\n\
+           -not $skip\n\
+         }} | ForEach-Object {{\n\
+           $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash\n\
+           $rel = $_.FullName.Substring($prefix).Replace('\\','/')\n\
+           \"$hash  $rel\"\n\
+         }}",
+        root = ps_single_quote(root),
+        excludes = ps_string_array(name_only_excludes)
+    );
+    format!(
+        "powershell -NoProfile -EncodedCommand {}",
+        powershell_encoded_command(&script)
+    )
+}
+
+/// Windows counterpart of [`remote_paths_walk_command_safe`]: PowerShell
+/// recursive enumeration that emits one relpath per line — no hashing,
+/// since the hook gate only needs to know which paths would be touched.
+pub fn remote_paths_walk_command_safe_windows(
+    root: &str,
+    name_only_excludes: &[String],
+) -> String {
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'\n\
+         $root = '{root}'\n\
+         if (-not (Test-Path -LiteralPath $root -PathType Container)) {{ return }}\n\
+         $excludes = @({excludes})\n\
+         $prefix = $root.TrimEnd('\\').Length + 1\n\
+         Get-ChildItem -LiteralPath $root -File -Recurse -Force | Where-Object {{\n\
+           $segments = $_.FullName.Substring($prefix).Split([char[]]@('\\','/'))\n\
+           $skip = $false\n\
+           foreach ($seg in $segments) {{\n\
+             foreach ($e in $excludes) {{ if ($seg -like $e) {{ $skip = $true; break }} }}\n\
+             if ($skip) {{ break }}\n\
+           }}\n\
+           -not $skip\n\
+         }} | ForEach-Object {{ $_.FullName.Substring($prefix).Replace('\\','/') }}",
+        root = ps_single_quote(root),
+        excludes = ps_string_array(name_only_excludes)
+    );
+    format!(
+        "powershell -NoProfile -EncodedCommand {}",
+        powershell_encoded_command(&script)
+    )
+}
+
+/// Parse the PowerShell walk-output (one path per line, separated by
+/// CR/LF) into a path set. Compatible with the POSIX
+/// [`parse_paths_walk_output`] semantics: paths are joined onto
+/// `base_name` and any `./` prefix is stripped.
+pub fn parse_paths_walk_output_lines(text: &str, base_name: &Path) -> HashSet<PathBuf> {
+    let mut out = HashSet::new();
+    for rel in text.lines() {
+        let trimmed = rel.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let trimmed = trimmed.trim_start_matches("./");
+        out.insert(base_name.join(trimmed));
+    }
+    out
+}
+
+/// Escape a string for embedding inside a PowerShell single-quoted
+/// literal — single quotes are doubled, everything else is literal.
+fn ps_single_quote(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+/// Render a list of names as a PowerShell array literal of single-quoted
+/// strings: `'a','b','c'` (or `` for an empty list).
+fn ps_string_array(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|n| format!("'{}'", ps_single_quote(n)))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Encode a PowerShell script for `-EncodedCommand`: UTF-16 LE, then
+/// base64. Skips all of the cmd.exe quoting interactions that make
+/// inline `-Command "..."` so fragile when the script contains paths
+/// and array literals.
+fn powershell_encoded_command(script: &str) -> String {
+    use base64::engine::Engine;
+    let utf16: Vec<u16> = script.encode_utf16().collect();
+    let mut bytes = Vec::with_capacity(utf16.len() * 2);
+    for u in utf16 {
+        bytes.extend_from_slice(&u.to_le_bytes());
+    }
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 /// Parse the NUL-separated `find -print0` output into a path set.
 pub fn parse_paths_walk_output(text: &str, base_name: &Path) -> HashSet<PathBuf> {
     let mut out = HashSet::new();

@@ -382,8 +382,24 @@ async fn decide_sync(
 
     // Remote path walk via a one-shot exec on the daemon's pool. The
     // command no-ops cleanly when the remote root does not exist yet, so a
-    // first-run sync just sees an empty remote set.
-    let remote_walk_cmd = changeset::remote_paths_walk_command_safe(remote, &name_only);
+    // first-run sync just sees an empty remote set. The shell command
+    // depends on the remote OS, so we read it off the cached probe and
+    // branch.
+    let remote_os = match pool.remote_os(config, host).await {
+        Ok(os) => os,
+        Err(e) => {
+            eprintln!("ssh-mcp: cannot determine remote OS for sync gate: {e:#}");
+            return Decision::Deny;
+        }
+    };
+    let remote_walk_cmd = match remote_os {
+        crate::ssh::RemoteOs::Posix => {
+            changeset::remote_paths_walk_command_safe(remote, &name_only)
+        }
+        crate::ssh::RemoteOs::Windows => {
+            changeset::remote_paths_walk_command_safe_windows(remote, &name_only)
+        }
+    };
     let remote_walk_out = match pool.exec(config, host, &remote_walk_cmd, timeout).await {
         Ok(out) if out.exit_code == 0 => out.stdout,
         Ok(out) => {
@@ -399,7 +415,14 @@ async fn decide_sync(
             return Decision::Deny;
         }
     };
-    let remote_paths = changeset::parse_paths_walk_output(&remote_walk_out, &empty);
+    let remote_paths = match remote_os {
+        crate::ssh::RemoteOs::Posix => {
+            changeset::parse_paths_walk_output(&remote_walk_out, &empty)
+        }
+        crate::ssh::RemoteOs::Windows => {
+            changeset::parse_paths_walk_output_lines(&remote_walk_out, &empty)
+        }
+    };
 
     // The source side is the one we copy *from*; the dest side is where
     // deletes can come from. compute_paths is direction-aware via which

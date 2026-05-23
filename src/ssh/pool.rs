@@ -158,9 +158,6 @@ impl ConnectionPool {
         timeout: Duration,
     ) -> Result<SyncResult> {
         let pc = self.get_or_connect(config, host_alias).await?;
-        if matches!(pc.os, RemoteOs::Windows) {
-            bail!(unsupported_windows_message("sync_put"));
-        }
         if !local_path.is_dir() {
             bail!(
                 "sync_put requires the local source to be a directory; {} is not",
@@ -170,14 +167,19 @@ impl ConnectionPool {
         // sync_* treats `remote_path` as a stable destination root, not as a
         // cp-merge target — that is what mirror semantics want (the same
         // mapping every run). The remote root is created on demand by the
-        // upload step's `mkdir -p`.
+        // upload step's `mkdir -p` (POSIX) or `mkdir` (Windows).
         let empty = PathBuf::new();
         let (name_only, _complex) = changeset::partition_excludes(exclude);
         let local_excludes = changeset::compile_excludes(exclude)?;
         let source_map = changeset::walk_local(local_path, &empty, &local_excludes)?;
 
         let walk_channel = self.open_session(config, host_alias).await?;
-        let walk_cmd = changeset::remote_walk_command_safe(remote_path, &name_only);
+        let walk_cmd = match pc.os {
+            RemoteOs::Posix => changeset::remote_walk_command_safe(remote_path, &name_only),
+            RemoteOs::Windows => {
+                changeset::remote_walk_command_safe_windows(remote_path, &name_only)
+            }
+        };
         let walk_out = transfer::exec_capture(walk_channel, &walk_cmd, timeout).await?;
         let dest_map = changeset::parse_walk_output(&walk_out, &empty)?;
 
@@ -193,19 +195,42 @@ impl ConnectionPool {
         let mut bytes = 0u64;
         if !outgoing.is_empty() {
             let channel = self.open_session(config, host_alias).await?;
-            bytes = transfer::upload_entries(
-                channel,
-                local_path,
-                &empty,
-                &outgoing,
-                remote_path,
-                timeout,
-            )
-            .await?;
+            bytes = match pc.os {
+                RemoteOs::Posix => {
+                    transfer::upload_entries(
+                        channel,
+                        local_path,
+                        &empty,
+                        &outgoing,
+                        remote_path,
+                        timeout,
+                    )
+                    .await?
+                }
+                RemoteOs::Windows => {
+                    transfer::upload_entries_windows(
+                        channel,
+                        local_path,
+                        &empty,
+                        &outgoing,
+                        remote_path,
+                        timeout,
+                    )
+                    .await?
+                }
+            };
         }
         if !deletes.is_empty() {
             let channel = self.open_session(config, host_alias).await?;
-            transfer::delete_remote(channel, remote_path, &deletes, timeout).await?;
+            match pc.os {
+                RemoteOs::Posix => {
+                    transfer::delete_remote(channel, remote_path, &deletes, timeout).await?
+                }
+                RemoteOs::Windows => {
+                    transfer::delete_remote_windows(channel, remote_path, &deletes, timeout)
+                        .await?
+                }
+            }
         }
         Ok(SyncResult { bytes, change_set })
     }
@@ -221,18 +246,23 @@ impl ConnectionPool {
         timeout: Duration,
     ) -> Result<SyncResult> {
         let pc = self.get_or_connect(config, host_alias).await?;
-        if matches!(pc.os, RemoteOs::Windows) {
-            bail!(unsupported_windows_message("sync_get"));
-        }
         let probe = self.open_session(config, host_alias).await?;
-        let remote_is_dir = transfer::remote_is_dir(probe, remote_path).await?;
+        let remote_is_dir = match pc.os {
+            RemoteOs::Posix => transfer::remote_is_dir(probe, remote_path).await?,
+            RemoteOs::Windows => transfer::remote_is_dir_windows(probe, remote_path).await?,
+        };
         if !remote_is_dir {
             bail!("sync_get requires the remote source to be a directory; {remote_path:?} is not");
         }
         let empty = PathBuf::new();
         let (name_only, _complex) = changeset::partition_excludes(exclude);
         let walk_channel = self.open_session(config, host_alias).await?;
-        let walk_cmd = changeset::remote_walk_command_safe(remote_path, &name_only);
+        let walk_cmd = match pc.os {
+            RemoteOs::Posix => changeset::remote_walk_command_safe(remote_path, &name_only),
+            RemoteOs::Windows => {
+                changeset::remote_walk_command_safe_windows(remote_path, &name_only)
+            }
+        };
         let walk_out = transfer::exec_capture(walk_channel, &walk_cmd, timeout).await?;
         let source_map = changeset::parse_walk_output(&walk_out, &empty)?;
 
@@ -253,9 +283,22 @@ impl ConnectionPool {
             std::fs::create_dir_all(local_path)
                 .with_context(|| format!("creating {}", local_path.display()))?;
             let channel = self.open_session(config, host_alias).await?;
-            bytes =
-                transfer::download_entries(channel, remote_path, &outgoing, local_path, timeout)
-                    .await?;
+            bytes = match pc.os {
+                RemoteOs::Posix => {
+                    transfer::download_entries(channel, remote_path, &outgoing, local_path, timeout)
+                        .await?
+                }
+                RemoteOs::Windows => {
+                    transfer::download_entries_windows(
+                        channel,
+                        remote_path,
+                        &outgoing,
+                        local_path,
+                        timeout,
+                    )
+                    .await?
+                }
+            };
         }
         for rel in &deletes {
             let target = local_path.join(rel);
@@ -506,14 +549,3 @@ async fn probe_one(handle: &client::Handle<StrictHostKey>, command: &str) -> Opt
         .and_then(|r| r.ok())
 }
 
-/// Friendly message for the four transfer tools when the target is a
-/// Windows remote that hasn't been ported yet. Names the tool the caller
-/// invoked so the model knows which call to retry through other means.
-fn unsupported_windows_message(tool: &str) -> String {
-    format!(
-        "{tool} is not yet supported against Windows remotes — the daemon's transfer engine \
-         only knows the POSIX shell commands (find, sha256sum, tar, rm). Use exec to drive a \
-         manual transfer for now (e.g. PowerShell + tar.exe), or wait for the Windows transport \
-         to land."
-    )
-}

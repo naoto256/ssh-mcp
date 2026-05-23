@@ -373,6 +373,152 @@ pub async fn delete_remote(
     Ok(())
 }
 
+/// Windows counterpart of [`upload_entries`]: pack chosen files into a
+/// tar archive, then untar through cmd.exe / `tar.exe` with `-C` for the
+/// destination directory.
+pub async fn upload_entries_windows(
+    mut channel: Channel<client::Msg>,
+    source_root: &Path,
+    source_root_name: &Path,
+    rel_paths: &[PathBuf],
+    target_dir: &str,
+    timeout: Duration,
+) -> Result<u64> {
+    let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
+    let archive = tar_file.path().to_path_buf();
+    let root = source_root.to_path_buf();
+    let base = source_root_name.to_path_buf();
+    let paths = rel_paths.to_vec();
+    tokio::task::spawn_blocking(move || pack_entries(&root, &base, &paths, &archive))
+        .await
+        .context("the archive creation task failed")??;
+    let bytes = tar_file
+        .as_file()
+        .metadata()
+        .context("sizing the archive")?
+        .len();
+
+    let command = format!(
+        "mkdir {dir} 2>nul & tar.exe -C {dir} -xzf -",
+        dir = cmd_quote(target_dir)
+    );
+    let input =
+        tokio::fs::File::from_std(tar_file.reopen().context("opening the temporary archive")?);
+    let result = tokio::time::timeout(timeout, run_upload(&mut channel, &command, input))
+        .await
+        .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
+    check_remote(&result)?;
+    Ok(bytes)
+}
+
+/// Windows counterpart of [`download_entries`]: the remote runs
+/// `tar.exe -C SOURCE_ROOT -czf - -- rel1 rel2 ...` and streams the
+/// archive back; the local side extracts straight into `dest_root` as
+/// for POSIX.
+pub async fn download_entries_windows(
+    mut channel: Channel<client::Msg>,
+    source_root: &str,
+    rel_paths_inside_source: &[PathBuf],
+    dest_root: &Path,
+    timeout: Duration,
+) -> Result<u64> {
+    std::fs::create_dir_all(dest_root)
+        .with_context(|| format!("creating {}", dest_root.display()))?;
+    let mut command = format!("tar.exe -C {dir} -czf -", dir = cmd_quote(source_root));
+    command.push_str(" --");
+    for rel in rel_paths_inside_source {
+        command.push(' ');
+        command.push_str(&cmd_quote(&rel.to_string_lossy()));
+    }
+
+    let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
+    let mut sink =
+        tokio::fs::File::from_std(tar_file.reopen().context("opening the temporary archive")?);
+
+    let (result, bytes) =
+        tokio::time::timeout(timeout, run_download(&mut channel, &command, &mut sink))
+            .await
+            .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
+    check_remote(&result)?;
+
+    let archive = tar_file.path().to_path_buf();
+    let dest = dest_root.to_path_buf();
+    tokio::task::spawn_blocking(move || unpack_into(&archive, &dest))
+        .await
+        .context("the archive extraction task failed")??;
+    Ok(bytes)
+}
+
+/// Windows counterpart of [`delete_remote`]: PowerShell `Remove-Item`
+/// per relative path, rooted at `root`. Quoting is single-quote PS so
+/// backslashes pass through untouched.
+pub async fn delete_remote_windows(
+    mut channel: Channel<client::Msg>,
+    root: &str,
+    rel_paths: &[PathBuf],
+    timeout: Duration,
+) -> Result<()> {
+    if rel_paths.is_empty() {
+        return Ok(());
+    }
+    // Build a PowerShell script that joins each rel path to root and
+    // removes it. Use Remove-Item with -Recurse -Force so directories
+    // and read-only files alike are dispatched.
+    let mut paths_literal = String::new();
+    for (i, rel) in rel_paths.iter().enumerate() {
+        if i > 0 {
+            paths_literal.push(',');
+        }
+        paths_literal.push('\'');
+        paths_literal.push_str(&ps_single_quote_local(&rel.to_string_lossy()));
+        paths_literal.push('\'');
+    }
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'\n\
+         $root = '{root}'\n\
+         foreach ($rel in @({paths})) {{\n\
+           $p = Join-Path $root $rel\n\
+           if (Test-Path -LiteralPath $p) {{ Remove-Item -LiteralPath $p -Recurse -Force }}\n\
+         }}",
+        root = ps_single_quote_local(root),
+        paths = paths_literal
+    );
+    let command = format!(
+        "powershell -NoProfile -EncodedCommand {}",
+        powershell_encoded_command_local(&script)
+    );
+    let result = tokio::time::timeout(timeout, run_simple(&mut channel, &command))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "the remote rm timed out after {} seconds",
+                timeout.as_secs()
+            )
+        })??;
+    check_remote(&result)?;
+    Ok(())
+}
+
+/// Local copy of the PowerShell single-quote escape — also lives in
+/// `changeset` for the walk-command builders. Both share the same trivial
+/// rule (double the embedded single quotes) so the two copies will not
+/// drift.
+fn ps_single_quote_local(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+/// Local copy of the `-EncodedCommand` encoder — sibling of the one in
+/// `changeset`. UTF-16 LE + base64.
+fn powershell_encoded_command_local(script: &str) -> String {
+    use base64::engine::Engine;
+    let utf16: Vec<u16> = script.encode_utf16().collect();
+    let mut bytes = Vec::with_capacity(utf16.len() * 2);
+    for u in utf16 {
+        bytes.extend_from_slice(&u.to_le_bytes());
+    }
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 /// Run a command that produces no output we care about, returning its exit
 /// status and stderr.
 async fn run_simple(channel: &mut Channel<client::Msg>, command: &str) -> Result<RemoteResult> {
