@@ -16,3 +16,4 @@ pub mod paths;
 pub mod policy;
 pub mod serve;
 pub mod ssh;
+pub mod trace;
