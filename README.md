@@ -31,7 +31,7 @@ must be an alias from `list_hosts`.
 | Tool | What it does |
 |---|---|
 | `list_hosts` | Returns each host's alias, purpose, tags, and policy kinds — **never** an address, user, or credential. Read-only, ungated. |
-| `exec` | Runs a shell command on a host and returns the exit code with scoped stdout/stderr. Requires an `op` (`tail` / `head` / `grep`) so output stays deliberately scoped; the full streams are kept in the per-session trace buffer for re-inspection. |
+| `exec` | Runs a shell command on a host and returns the exit code with scoped stdout/stderr. Requires an `op` (`tail` / `head` / `grep`) so output stays deliberately scoped; the full streams are kept in the per-session trace buffer for re-inspection. Piping the command through `tail` / `head` / `grep` yourself (instead of using `op`) defeats the trace path; the daemon spots that and returns an advisory `note` on the result. |
 | `get` | Downloads a file or directory. If the local destination is an existing directory the entry lands inside it under its remote base name (the `cp` rule); otherwise it replaces the destination. Returns wire bytes (tar framing + metadata, not the sum of file content sizes). |
 | `put` | Symmetric: uploads a local file or directory. If the remote destination is an existing directory the entry lands inside; otherwise it replaces. Returns wire bytes (same meaning as `get`). |
 | `sync_get` / `sync_put` | Mirror a directory in either direction. Both paths are treated as roots: files in the destination that are absent from the source are deleted; files matching by sha-256 are skipped. Returns per-op counts and the wire bytes for the files that actually moved. |

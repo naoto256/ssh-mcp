@@ -226,6 +226,25 @@ dump cannot be requested by accident.
 The tool returns only the scoped slice. The full stdout/stderr is kept
 in the trace buffer (next).
 
+A model that has internalised "scope your output" will still sometimes
+double-scope — pass an `op` *and* pipe the command through `tail` in
+the shell. The reflex is safe-feeling but expensive: the shell has
+already scoped at its level, so the trace buffer only contains the
+post-pipe slice. Re-scoping through `trace` would just return the
+same lines back.
+
+Spelling that out in the description is necessary but not sufficient
+(models read schemas, then fall back to instinct). So the daemon also
+notices: a quote-aware scan finds the last unquoted pipe and, if it
+targets a known scoping program (`tail` / `head` / `grep` / `egrep` /
+`fgrep` / `rg`), the result carries an advisory `note` explaining what
+was lost and pointing at `op`. The exec still runs — the command was
+the caller's intent — and the note is just a low-strength signal that
+travels back with the result. The combination of "execution succeeds"
+plus "small annoying message every time" turns out to be exactly the
+shape that nudges a model away from the pattern without provoking it
+into looking for a workaround.
+
 ### 5.2 The ring buffer
 
 Each MCP session has its own ring buffer holding the last five tool
