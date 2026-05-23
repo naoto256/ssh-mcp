@@ -8,7 +8,7 @@
 //! intact.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -34,9 +34,12 @@ struct RemoteResult {
     stderr: String,
 }
 
-/// Download a remote file or directory into `local_path` by streaming a tar
-/// archive over `channel`, replacing `local_path` if it already exists. An
-/// entry whose name matches an `exclude` glob is left out.
+/// Download a remote file or directory to `local_path`.
+///
+/// The destination follows `cp` semantics: if `local_path` is an existing
+/// directory the downloaded entry is placed inside it under its remote base
+/// name; otherwise the downloaded entry replaces `local_path`. An entry whose
+/// name matches an `exclude` glob is left out of the archive.
 pub async fn download(
     mut channel: Channel<client::Msg>,
     remote_path: &str,
@@ -44,12 +47,13 @@ pub async fn download(
     exclude: &[String],
     timeout: Duration,
 ) -> Result<TransferStats> {
-    let parent = local_parent(local_path);
+    let (dir, base) = split_remote(remote_path)?;
+    let target = resolve_download_target(local_path, &base);
+    let parent = local_parent(&target);
     if !parent.is_dir() {
         bail!("the local directory {} does not exist", parent.display());
     }
 
-    let (dir, base) = split_remote(remote_path)?;
     // `tar -C dir base` archives `base` relative to `dir`, so the archive's top
     // entry is exactly `base` regardless of how deep the remote path was. `-z`
     // gzips the stream on the remote; each `--exclude` drops a matching name.
@@ -70,7 +74,7 @@ pub async fn download(
     check_remote(&result)?;
 
     let archive = tar_file.path().to_path_buf();
-    let dest = local_path.to_path_buf();
+    let dest = target;
     let entry = base.clone();
     tokio::task::spawn_blocking(move || unpack(&archive, &entry, &dest))
         .await
@@ -78,13 +82,29 @@ pub async fn download(
     Ok(TransferStats { bytes })
 }
 
+/// Resolve where a downloaded entry should land. `cp` semantics: if the
+/// caller-supplied destination is already a directory, the entry is placed
+/// inside it under its remote base name; otherwise the destination is taken
+/// as-is and replaces whatever was there.
+fn resolve_download_target(dest: &Path, entry_name: &str) -> PathBuf {
+    if dest.is_dir() {
+        dest.join(entry_name)
+    } else {
+        dest.to_path_buf()
+    }
+}
+
 /// Upload a local file or directory to `remote_path` by streaming a tar archive
-/// over `channel`. The remote parent directory is created if it is missing. An
-/// entry whose name matches an `exclude` glob is left out.
+/// over `channel`. The caller must report whether `remote_path` already exists
+/// as a directory: when it does, `cp` semantics place the local entry inside
+/// it under its local base name; otherwise the local entry replaces whatever
+/// is at `remote_path`. The remote parent directory is created if it is
+/// missing. An entry whose name matches an `exclude` glob is left out.
 pub async fn upload(
     mut channel: Channel<client::Msg>,
     local_path: &Path,
     remote_path: &str,
+    remote_is_existing_dir: bool,
     exclude: &[String],
     timeout: Duration,
 ) -> Result<TransferStats> {
@@ -93,7 +113,7 @@ pub async fn upload(
     }
     let excludes = compile_excludes(exclude)?;
 
-    let (dir, base) = split_remote(remote_path)?;
+    let (dir, base) = resolve_upload_target(local_path, remote_path, remote_is_existing_dir)?;
     let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
     let archive = tar_file.path().to_path_buf();
     let source = local_path.to_path_buf();
@@ -119,6 +139,48 @@ pub async fn upload(
         .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
     check_remote(&result)?;
     Ok(TransferStats { bytes })
+}
+
+/// Resolve where an uploaded archive should land. `cp` semantics: if
+/// `remote_path` exists as a directory the local entry is placed inside it
+/// under its local base name; otherwise the local entry replaces whatever is
+/// at `remote_path` (its name is taken from `remote_path`'s tail).
+fn resolve_upload_target(
+    local_path: &Path,
+    remote_path: &str,
+    remote_is_existing_dir: bool,
+) -> Result<(String, String)> {
+    if remote_is_existing_dir {
+        let local_base = local_path
+            .file_name()
+            .ok_or_else(|| anyhow!("the local path {} has no file name", local_path.display()))?
+            .to_string_lossy()
+            .into_owned();
+        let dir = remote_path.trim_end_matches('/');
+        let dir = if dir.is_empty() { "/" } else { dir };
+        Ok((dir.to_string(), local_base))
+    } else {
+        split_remote(remote_path)
+    }
+}
+
+/// Detect whether a remote path is an existing directory by running a short
+/// `test -d` over `channel`. A non-zero exit is taken to mean "not a directory"
+/// — this covers both "does not exist" and "exists but is a file or symlink",
+/// which take the same `cp` branch (the local entry replaces the path).
+pub async fn remote_is_dir(mut channel: Channel<client::Msg>, path: &str) -> Result<bool> {
+    let command = format!("test -d {}", shell_quote(path));
+    channel
+        .exec(true, command)
+        .await
+        .context("the remote test request failed")?;
+    let mut exit_code = -1;
+    while let Some(message) = channel.wait().await {
+        if let ChannelMsg::ExitStatus { exit_status } = message {
+            exit_code = exit_status as i32;
+        }
+    }
+    Ok(exit_code == 0)
 }
 
 /// Run the remote archive command and stream its stdout to `sink`, returning
@@ -284,7 +346,9 @@ fn append_tree<W: Write>(
 }
 
 /// Extract the `archive` file and move its `entry_name` entry to `dest`.
-/// Synchronous; run on a blocking task.
+/// `dest` is the fully resolved final path: the caller has already applied
+/// `cp` semantics (place-inside vs. replace), so this function is unaware of
+/// the distinction. Synchronous; run on a blocking task.
 fn unpack(archive: &Path, entry_name: &str, dest: &Path) -> Result<()> {
     // Extract into a staging directory beside `dest` — same filesystem, so the
     // final move is an atomic rename — then promote the one entry we asked for.
@@ -448,6 +512,62 @@ mod tests {
         std::fs::write(&dest, b"stale content").unwrap();
         unpack(&archive, "entry.txt", &dest).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"fresh content");
+    }
+
+    #[test]
+    fn unpack_into_existing_directory_places_entry_inside() {
+        // `cp` semantics: when `dest` is an existing directory, the downloaded
+        // entry lands inside it under its archive name, rather than replacing
+        // the whole directory.
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("payload.txt");
+        std::fs::write(&source, b"payload").unwrap();
+        let archive = dir.path().join("bundle.tar");
+        pack(&source, "payload.txt", &archive, &GlobSet::empty()).unwrap();
+
+        let dest = dir.path().join("inbox");
+        std::fs::create_dir(&dest).unwrap();
+        // A pre-existing sibling must survive — the directory is merged, not
+        // replaced.
+        std::fs::write(dest.join("sibling.txt"), b"keep me").unwrap();
+
+        let target = resolve_download_target(&dest, "payload.txt");
+        unpack(&archive, "payload.txt", &target).unwrap();
+
+        assert_eq!(std::fs::read(dest.join("payload.txt")).unwrap(), b"payload");
+        assert_eq!(std::fs::read(dest.join("sibling.txt")).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn resolve_upload_target_places_inside_existing_remote_directory() {
+        // `cp` semantics again, mirrored on the upload side: an existing
+        // remote directory becomes the parent and the entry takes the local
+        // file's name.
+        let local = Path::new("/home/user/payload.txt");
+        let (dir, base) = resolve_upload_target(local, "/srv/inbox", true).unwrap();
+        assert_eq!(dir, "/srv/inbox");
+        assert_eq!(base, "payload.txt");
+
+        // A trailing slash on a directory must not produce an empty target.
+        let (dir, base) = resolve_upload_target(local, "/srv/inbox/", true).unwrap();
+        assert_eq!(dir, "/srv/inbox");
+        assert_eq!(base, "payload.txt");
+
+        // The root, were it the target directory, must stay `/` after trim.
+        let (dir, base) = resolve_upload_target(local, "/", true).unwrap();
+        assert_eq!(dir, "/");
+        assert_eq!(base, "payload.txt");
+    }
+
+    #[test]
+    fn resolve_upload_target_replaces_a_non_directory_remote() {
+        // Replace semantics for the non-directory case: the remote path is
+        // split into (parent, name) and the local entry takes the remote name
+        // — this is how a rename like `cp a.txt /srv/b.txt` is expressed.
+        let local = Path::new("/home/user/a.txt");
+        let (dir, base) = resolve_upload_target(local, "/srv/b.txt", false).unwrap();
+        assert_eq!(dir, "/srv");
+        assert_eq!(base, "b.txt");
     }
 
     #[test]

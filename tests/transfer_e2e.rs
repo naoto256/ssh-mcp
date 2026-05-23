@@ -121,6 +121,84 @@ async fn get_file_replaces_an_existing_local_path() {
 
 #[tokio::test]
 #[ignore = "requires a reachable SSH host supplied via env vars"]
+async fn get_file_into_existing_directory_lands_inside() {
+    // `cp` semantics: when `local_path` is an existing directory, the
+    // download lands inside it under the remote's base name rather than
+    // replacing the whole directory.
+    let config = test_config();
+    let pool = ConnectionPool::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+
+    let source = dir.path().join("payload.txt");
+    std::fs::write(&source, b"payload").unwrap();
+    let remote = remote_path("merge-get");
+    pool.put_file(&config, "target", &source, &remote, &[], TIMEOUT)
+        .await
+        .expect("upload should succeed");
+
+    let inbox = dir.path().join("inbox");
+    std::fs::create_dir(&inbox).unwrap();
+    std::fs::write(inbox.join("keep.txt"), b"existing").unwrap();
+
+    pool.get_file(&config, "target", &remote, &inbox, &[], TIMEOUT)
+        .await
+        .expect("download into a directory should land inside it");
+
+    // The remote file's basename — taken from the remote path, not from the
+    // local source — is what shows up inside the inbox.
+    let remote_base = remote.rsplit('/').next().unwrap();
+    assert_eq!(std::fs::read(inbox.join(remote_base)).unwrap(), b"payload");
+    assert_eq!(std::fs::read(inbox.join("keep.txt")).unwrap(), b"existing");
+    pool.exec(&config, "target", &format!("rm -rf {remote}"), TIMEOUT)
+        .await
+        .ok();
+}
+
+#[tokio::test]
+#[ignore = "requires a reachable SSH host supplied via env vars"]
+async fn put_file_into_existing_directory_lands_inside() {
+    // Mirror of the get test: a put into an existing remote directory lands
+    // inside it under the local file's base name. Siblings already on the
+    // remote survive.
+    let config = test_config();
+    let pool = ConnectionPool::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+
+    let source = dir.path().join("upload.txt");
+    std::fs::write(&source, b"uploaded").unwrap();
+    let inbox = remote_path("merge-put");
+    // Seed the remote directory with a sibling we expect to keep.
+    let sibling = dir.path().join("sibling.txt");
+    std::fs::write(&sibling, b"sibling").unwrap();
+    pool.put_file(
+        &config,
+        "target",
+        &sibling,
+        &format!("{inbox}/sibling.txt"),
+        &[],
+        TIMEOUT,
+    )
+    .await
+    .expect("seeding the remote sibling should succeed");
+
+    pool.put_file(&config, "target", &source, &inbox, &[], TIMEOUT)
+        .await
+        .expect("upload into a remote directory should land inside it");
+
+    let back = dir.path().join("back");
+    pool.get_file(&config, "target", &inbox, &back, &[], TIMEOUT)
+        .await
+        .expect("downloading the remote dir should succeed");
+    assert_eq!(std::fs::read(back.join("upload.txt")).unwrap(), b"uploaded");
+    assert_eq!(std::fs::read(back.join("sibling.txt")).unwrap(), b"sibling");
+
+    pool.exec(&config, "target", &format!("rm -rf {inbox}"), TIMEOUT)
+        .await
+        .ok();
+}
+
+#[tokio::test]
+#[ignore = "requires a reachable SSH host supplied via env vars"]
 async fn put_file_skips_excluded_entries() {
     let config = test_config();
     let pool = ConnectionPool::new().unwrap();

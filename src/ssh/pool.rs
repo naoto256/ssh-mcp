@@ -65,8 +65,12 @@ impl ConnectionPool {
         run_command(&mut channel, command, timeout).await
     }
 
-    /// Download a remote file or directory into `local_path`, replacing it if
-    /// it already exists. Entries matching an `exclude` glob are skipped.
+    /// Download a remote file or directory to `local_path`.
+    ///
+    /// The destination follows `cp` semantics: if `local_path` is an existing
+    /// directory the downloaded entry is placed inside it under its remote
+    /// base name; otherwise the downloaded entry replaces `local_path`.
+    /// Entries matching an `exclude` glob are skipped.
     pub async fn get_file(
         &self,
         config: &HostsConfig,
@@ -80,8 +84,12 @@ impl ConnectionPool {
         transfer::download(channel, remote_path, local_path, exclude, timeout).await
     }
 
-    /// Upload a local file or directory to `remote_path`, replacing it if it
-    /// already exists. Entries matching an `exclude` glob are skipped.
+    /// Upload a local file or directory to `remote_path`.
+    ///
+    /// The destination follows `cp` semantics: if `remote_path` is an existing
+    /// directory the local entry is placed inside it under its local base
+    /// name; otherwise the local entry replaces whatever is at `remote_path`.
+    /// Entries matching an `exclude` glob are skipped.
     pub async fn put_file(
         &self,
         config: &HostsConfig,
@@ -91,8 +99,23 @@ impl ConnectionPool {
         exclude: &[String],
         timeout: Duration,
     ) -> Result<TransferStats> {
+        // The destination resolution depends on whether `remote_path` is an
+        // existing directory, which only the remote can tell us. The probe
+        // and the transfer each get their own channel — channels are
+        // single-use under russh, and the connection is pooled so there is no
+        // round-trip for the second open.
+        let probe = self.open_session(config, host_alias).await?;
+        let remote_is_dir = transfer::remote_is_dir(probe, remote_path).await?;
         let channel = self.open_session(config, host_alias).await?;
-        transfer::upload(channel, local_path, remote_path, exclude, timeout).await
+        transfer::upload(
+            channel,
+            local_path,
+            remote_path,
+            remote_is_dir,
+            exclude,
+            timeout,
+        )
+        .await
     }
 
     /// Open a fresh channel on a host's pooled connection. A dead pooled
