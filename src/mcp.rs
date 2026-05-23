@@ -130,10 +130,13 @@ pub struct TraceResult {
     /// Total stderr lines in the recorded entry, before any filter. Zero
     /// for transfer entries.
     pub stderr_lines: u32,
-    /// Total lines available after the stream selector filtered the body
-    /// but before the `op` filtered any out. `lines.len()` is the kept
-    /// count.
-    pub total_lines: u32,
+    /// For transfer entries: the body length before the `op` filtered any
+    /// lines out (channel concept does not apply). Omitted for `exec`
+    /// entries because it would be a pure derivation of
+    /// `stdout_lines` / `stderr_lines` and the `stream` selector — the
+    /// caller can compute it without help.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_lines: Option<u32>,
     /// Set when the originating tool's body exceeded the per-entry byte cap
     /// and the buffer dropped the tail.
     pub truncated: bool,
@@ -216,7 +219,10 @@ pub struct SyncPutParams {
 /// The result of a transfer.
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct TransferResult {
-    /// The number of bytes transferred.
+    /// Total bytes that crossed the wire, including tar framing, gzip
+    /// overhead, and per-file metadata — not the sum of file content
+    /// sizes. Useful as a rough transfer-cost indicator, not as a file-
+    /// size measurement.
     pub bytes: u64,
 }
 
@@ -225,6 +231,10 @@ pub struct TransferResult {
 /// kept in the trace buffer; call `trace` to drill in.
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SyncResult {
+    /// Total bytes that crossed the wire (only files marked `created` or
+    /// `updated` were sent), including tar framing, gzip overhead, and
+    /// per-file metadata — not the sum of file content sizes. Zero when
+    /// every file matched by sha-256.
     pub bytes: u64,
     pub created: u32,
     pub updated: u32,
@@ -406,7 +416,17 @@ impl SshMcpServer {
                 text: s.clone(),
             }));
         }
-        let total_lines = body.len() as u32;
+        // `total_lines` is meaningful for transfer entries — they have no
+        // stdout/stderr split, so it's the only count the caller can read.
+        // For `exec`, it would be a pure derivation of stdout_lines /
+        // stderr_lines and the stream selector, so it is omitted.
+        let is_transfer = body.iter().any(|l| l.channel == Channel::Transfer)
+            || (stdout_lines_raw == 0 && stderr_lines_raw == 0);
+        let total_lines = if is_transfer {
+            Some(body.len() as u32)
+        } else {
+            None
+        };
 
         let kept = op.apply_tagged(body)?;
         // Output formatting: prefix exec channels only when `stream = both`
@@ -435,7 +455,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "get",
-        description = "Download a file or directory from a host to the local machine. Files and directories are both supported (the tool name omits 'file' because the same call covers both). remote_path is on the host (absolute, or relative to the login directory — no leading ~); local_path is where it lands locally (absolute, or starting with ~/). If local_path is an existing directory the entry is placed inside it under its remote base name; otherwise local_path is replaced. The host's configured exclude patterns are always skipped; pass exclude to add more globs for this call. Result is a byte count only — the full per-file detail is not returned; call trace if you need it."
+        description = "Download a file or directory from a host to the local machine. Files and directories are both supported (the tool name omits 'file' because the same call covers both). remote_path is on the host (absolute, or relative to the login directory — no leading ~); local_path is where it lands locally (absolute, or starting with ~/). If local_path is an existing directory the entry is placed inside it under its remote base name; otherwise local_path is replaced. The host's configured exclude patterns are always skipped; pass exclude to add more globs for this call. Result is a byte count only — the full per-file detail is not returned; call trace if you need it. `bytes` is the total transferred over the wire including tar framing and metadata, not the sum of file content sizes."
     )]
     async fn get(
         &self,
@@ -495,7 +515,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "sync_get",
-        description = "Mirror a remote directory into a local location. Both paths are treated as roots — files on the local side that are absent from the remote source are deleted; files matching by sha256 are skipped. The remote source must be a directory; the local destination is created if missing. Returns per-op counts only (created/updated/deleted/skipped). **The per-file list is not in the result** — to see which files moved, call `trace` (the touched files come back as `<verb> <path>` lines; pass `include_skipped` to also see the hash-matched ones). The host's configured exclude patterns are always skipped; pass exclude to add more globs for this call."
+        description = "Mirror a remote directory into a local location. Both paths are treated as roots — files on the local side that are absent from the remote source are deleted; files matching by sha256 are skipped. The remote source must be a directory; the local destination is created if missing. Returns per-op counts only (created/updated/deleted/skipped). **The per-file list is not in the result** — to see which files moved, call `trace` (the touched files come back as `<verb> <path>` lines; pass `include_skipped` to also see the hash-matched ones). The host's configured exclude patterns are always skipped; pass exclude to add more globs for this call. `bytes` is the total transferred over the wire (only created/updated files were sent), including tar framing and metadata — not the sum of file content sizes."
     )]
     async fn sync_get(
         &self,
@@ -560,7 +580,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "sync_put",
-        description = "Mirror a local directory onto a host. Both paths are treated as roots — files on the remote that are absent from the local source are deleted; files matching by sha256 are skipped. The local source must be a directory; the remote destination is created if missing. Returns per-op counts only (created/updated/deleted/skipped). **The per-file list is not in the result** — to see which files moved, call `trace` (the touched files come back as `<verb> <path>` lines; pass `include_skipped` to also see the hash-matched ones). The inventory's configured exclude patterns are always skipped; pass exclude to add more globs for this call."
+        description = "Mirror a local directory onto a host. Both paths are treated as roots — files on the remote that are absent from the local source are deleted; files matching by sha256 are skipped. The local source must be a directory; the remote destination is created if missing. Returns per-op counts only (created/updated/deleted/skipped). **The per-file list is not in the result** — to see which files moved, call `trace` (the touched files come back as `<verb> <path>` lines; pass `include_skipped` to also see the hash-matched ones). The inventory's configured exclude patterns are always skipped; pass exclude to add more globs for this call. `bytes` is the total transferred over the wire (only created/updated files were sent), including tar framing and metadata — not the sum of file content sizes."
     )]
     async fn sync_put(
         &self,
@@ -668,7 +688,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "put",
-        description = "Upload a local file or directory to a host. Files and directories are both supported (the tool name omits 'file' because the same call covers both). local_path is the local source (absolute, or starting with ~/); remote_path is where it lands on the host (absolute, or relative to the login directory — no leading ~). If remote_path is an existing directory the entry is placed inside it under its local base name; otherwise remote_path is replaced. The inventory's configured exclude patterns (e.g. build output) are always skipped; pass exclude to add more globs for this call. Result is a byte count only — the full per-file detail is not returned; call trace if you need it."
+        description = "Upload a local file or directory to a host. Files and directories are both supported (the tool name omits 'file' because the same call covers both). local_path is the local source (absolute, or starting with ~/); remote_path is where it lands on the host (absolute, or relative to the login directory — no leading ~). If remote_path is an existing directory the entry is placed inside it under its local base name; otherwise remote_path is replaced. The inventory's configured exclude patterns (e.g. build output) are always skipped; pass exclude to add more globs for this call. Result is a byte count only — the full per-file detail is not returned; call trace if you need it. `bytes` is the total transferred over the wire including tar framing and metadata, not the sum of file content sizes."
     )]
     async fn put(
         &self,
