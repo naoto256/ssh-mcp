@@ -14,10 +14,14 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
+use std::time::Duration;
+
 use crate::audit::AuditLog;
+use crate::changeset;
 use crate::config::HostsConfig;
 use crate::pathnorm::{normalize_local, normalize_remote};
 use crate::policy::{Decision, Evaluator, Subject, Tool, combine_gates};
+use crate::ssh::ConnectionPool;
 
 /// The PreToolUse request the hook forwards: the tool name and its input, plus
 /// the session's permission mode, which sets the no-match fallback.
@@ -36,23 +40,40 @@ struct ToolInput {
     host: Option<String>,
     /// Present for `exec`.
     command: Option<String>,
-    /// Present for `get_file` and `put_file`.
+    /// Present for `get_file` / `put_file` / `sync_get` / `sync_put`.
     remote_path: Option<String>,
     local_path: Option<String>,
+    /// Per-call exclude additions for transfers. Optional and additive on
+    /// top of the inventory's configured excludes.
+    #[serde(default)]
+    exclude: Vec<String>,
 }
 
 /// The direction of a file transfer.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TransferDir {
     Get,
     Put,
 }
 
+/// Shape of the transfer for gating purposes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransferKind {
+    /// `get_file` / `put_file`: single source path, cp-merge target, one
+    /// `(remote_path, local_path)` pair to gate.
+    Single,
+    /// `sync_get` / `sync_put`: directory mirror, per-entry gating against
+    /// the change set built from `find -print0` on both sides.
+    Sync,
+}
+
 /// A file transfer request, as the control handler sees it.
 struct Transfer<'a> {
     direction: TransferDir,
+    kind: TransferKind,
     remote_path: &'a str,
     local_path: &'a str,
+    exclude: &'a [String],
 }
 
 /// Handle one control-socket connection. This never panics and always writes a
@@ -61,9 +82,10 @@ pub async fn handle_connection(
     mut stream: UnixStream,
     config_path: &Path,
     evaluator: &Evaluator,
+    pool: &ConnectionPool,
     audit: &AuditLog,
 ) {
-    let (decision, reason) = match process(&mut stream, config_path, evaluator, audit).await {
+    let (decision, reason) = match process(&mut stream, config_path, evaluator, pool, audit).await {
         Ok((host, decision)) => (decision, format!("ssh-mcp policy for host {host:?}")),
         Err(e) => {
             eprintln!("ssh-mcp: control request failed, denying: {e:#}");
@@ -83,6 +105,7 @@ async fn process(
     stream: &mut UnixStream,
     config_path: &Path,
     evaluator: &Evaluator,
+    pool: &ConnectionPool,
     audit: &AuditLog,
 ) -> Result<(String, Decision)> {
     let mut raw = String::new();
@@ -120,18 +143,26 @@ async fn process(
                 .local_path
                 .clone()
                 .context("the transfer request carries no local_path")?;
+            let exclude = request.tool_input.exclude.clone();
             let direction = if matches!(tool, "mcp__ssh__get_file" | "mcp__ssh__sync_get") {
                 TransferDir::Get
             } else {
                 TransferDir::Put
             };
+            let kind = if matches!(tool, "mcp__ssh__sync_get" | "mcp__ssh__sync_put") {
+                TransferKind::Sync
+            } else {
+                TransferKind::Single
+            };
             let transfer = Transfer {
                 direction,
+                kind,
                 remote_path: &remote,
                 local_path: &local,
+                exclude: &exclude,
             };
             let decision =
-                decide_transfer(evaluator, &config, &host, &transfer, &raw, fallback).await;
+                decide_transfer(evaluator, &config, pool, &host, &transfer, &raw, fallback).await;
             (decision, format!("{tool} {remote} <-> {local}"))
         }
         _ => {
@@ -222,6 +253,7 @@ async fn decide_subject(
 async fn decide_transfer(
     evaluator: &Evaluator,
     config: &HostsConfig,
+    pool: &ConnectionPool,
     host: &str,
     transfer: &Transfer<'_>,
     raw_request: &str,
@@ -237,20 +269,37 @@ async fn decide_transfer(
             return Decision::Deny;
         }
     };
-    let local = match normalize_local(transfer.local_path) {
+    let local_buf = match normalize_local(transfer.local_path) {
         Ok(path) => path,
         Err(e) => {
             eprintln!("ssh-mcp: rejecting a transfer with a bad local path: {e:#}");
             return Decision::Deny;
         }
     };
-    let local = local.to_string_lossy();
+    let local = local_buf.to_string_lossy();
 
     // A download reads the remote and writes the local; an upload, the reverse.
     let (remote_tool, local_tool) = match transfer.direction {
         TransferDir::Get => (Tool::Read, Tool::Write),
         TransferDir::Put => (Tool::Write, Tool::Read),
     };
+
+    if transfer.kind == TransferKind::Sync {
+        return decide_sync(
+            evaluator,
+            config,
+            pool,
+            host,
+            transfer,
+            &remote,
+            &local_buf,
+            remote_tool,
+            local_tool,
+            raw_request,
+            fallback,
+        )
+        .await;
+    }
 
     let remote_decision = decide_subject(
         evaluator,
@@ -274,6 +323,147 @@ async fn decide_transfer(
     };
 
     combine_gates(&[remote_decision, local_decision], fallback)
+}
+
+/// Per-entry policy evaluation for `sync_get` / `sync_put`. The hook walks
+/// both sides with `find -print0` (no hashing — `Skip` vs `Update` is not a
+/// policy distinction), classifies every path that would be touched, and
+/// gates each one against the host's policy on the remote side and the
+/// user's settings on the local side. The single decision returned to the
+/// harness is strictest-wins across all entries; one `Deny` ruins the
+/// transfer, one `Ask` surfaces a prompt covering the whole change set.
+#[allow(clippy::too_many_arguments)]
+async fn decide_sync(
+    evaluator: &Evaluator,
+    config: &HostsConfig,
+    pool: &ConnectionPool,
+    host: &str,
+    transfer: &Transfer<'_>,
+    remote: &str,
+    local: &Path,
+    remote_tool: Tool,
+    local_tool: Tool,
+    raw_request: &str,
+    fallback: Decision,
+) -> Decision {
+    // The path walks consume the host's exec budget. A walk takes far less
+    // than a normal exec — `find -print0` only — but bounding it on the
+    // same dial keeps configuration in one place.
+    let host_entry = match config.host(host) {
+        Some(entry) => entry,
+        None => return Decision::Deny,
+    };
+    let timeout = Duration::from_secs(config.exec_timeout_secs(host_entry));
+
+    // sync_* leaves both paths as roots — no cp-merge — so the per-entry
+    // remote and local absolute paths are simply `root + rel`.
+    let empty = PathBuf::new();
+    let local_excludes = match changeset::compile_excludes(transfer.exclude) {
+        Ok(set) => set,
+        Err(e) => {
+            eprintln!("ssh-mcp: invalid exclude in sync request: {e:#}");
+            return Decision::Deny;
+        }
+    };
+    let (name_only, _complex) = changeset::partition_excludes(transfer.exclude);
+
+    let (source_root_remote, source_is_remote) = match transfer.direction {
+        TransferDir::Get => (Some(remote), true),
+        TransferDir::Put => (None, false),
+    };
+
+    // Local path walk.
+    let local_paths = match changeset::walk_local_paths(local, &empty, &local_excludes) {
+        Ok(set) => set,
+        Err(e) => {
+            eprintln!("ssh-mcp: local walk failed in sync gate: {e:#}");
+            return Decision::Deny;
+        }
+    };
+
+    // Remote path walk via a one-shot exec on the daemon's pool. The
+    // command no-ops cleanly when the remote root does not exist yet, so a
+    // first-run sync just sees an empty remote set.
+    let remote_walk_cmd = changeset::remote_paths_walk_command_safe(remote, &name_only);
+    let remote_walk_out = match pool.exec(config, host, &remote_walk_cmd, timeout).await {
+        Ok(out) if out.exit_code == 0 => out.stdout,
+        Ok(out) => {
+            eprintln!(
+                "ssh-mcp: remote walk in sync gate exited {}: {}",
+                out.exit_code,
+                out.stderr.trim()
+            );
+            return Decision::Deny;
+        }
+        Err(e) => {
+            eprintln!("ssh-mcp: remote walk in sync gate failed: {e:#}");
+            return Decision::Deny;
+        }
+    };
+    let remote_paths = changeset::parse_paths_walk_output(&remote_walk_out, &empty);
+
+    // The source side is the one we copy *from*; the dest side is where
+    // deletes can come from. compute_paths is direction-aware via which
+    // set we hand it.
+    let (source_set, dest_set) = if source_is_remote {
+        (&remote_paths, &local_paths)
+    } else {
+        (&local_paths, &remote_paths)
+    };
+    let entries = changeset::compute_paths(source_set, dest_set, /* mirror = */ true);
+    let _ = source_root_remote; // direction is encoded in the (source, dest) pairing above
+
+    if entries.is_empty() {
+        // Nothing would change; nothing to ask about. Allow trivially.
+        return Decision::Allow;
+    }
+
+    let mut decisions: Vec<Decision> = Vec::with_capacity(entries.len() * 2);
+    for entry in &entries {
+        let rel = entry.rel_path.to_string_lossy();
+        let remote_abs = join_remote(remote, &rel);
+        let local_abs = local.join(&entry.rel_path);
+        let local_abs_display = local_abs.to_string_lossy();
+
+        let remote_d = decide_subject(
+            evaluator,
+            config,
+            host,
+            Subject::Path {
+                tool: remote_tool,
+                path: &remote_abs,
+            },
+            raw_request,
+            fallback,
+        )
+        .await;
+        let local_d = match evaluator.check_user_path(local_tool, &local_abs_display) {
+            Ok(d) => combine_gates(&[d], fallback),
+            Err(e) => {
+                eprintln!("ssh-mcp: local policy check failed in sync gate: {e:#}");
+                return Decision::Deny;
+            }
+        };
+        decisions.push(remote_d);
+        decisions.push(local_d);
+        if matches!(remote_d, Decision::Deny) || matches!(local_d, Decision::Deny) {
+            // One deny is enough; short-circuit to avoid hammering hook
+            // sub-processes once the answer is known.
+            return Decision::Deny;
+        }
+    }
+    combine_gates(&decisions, fallback)
+}
+
+/// Join a normalized remote root with a relative path. The result keeps
+/// the root's leading `/` and uses `/` as the separator regardless of how
+/// the local `PathBuf` would have printed.
+fn join_remote(root: &str, rel: &str) -> String {
+    if rel.is_empty() {
+        return root.to_string();
+    }
+    let trimmed = root.trim_end_matches('/');
+    format!("{trimmed}/{rel}")
 }
 
 /// Run one `hook` gate. A gate that cannot be evaluated fails closed.

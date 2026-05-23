@@ -9,7 +9,7 @@
 //! tree) but is otherwise direction-agnostic: callers tell it which side is
 //! "source" and which is "dest".
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -209,6 +209,115 @@ pub fn walk_local(
 pub fn remote_walk_command_safe(root: &str, name_only_excludes: &[String]) -> String {
     let inner = remote_walk_command(root, name_only_excludes);
     format!("if [ -d {} ]; then {inner}; fi", shell_quote(root))
+}
+
+/// Paths-only walk: the hook gate only needs the *set of paths* that would
+/// be touched, never the hashes. Building the change set from path
+/// existence alone (source-only → Create, both → Update, dest-only →
+/// Delete) is enough to evaluate `Edit(path)` per entry.
+///
+/// Walking by paths instead of hashes is what makes the hook gate cheap —
+/// for a 10 k file tree the local cost is a single `WalkDir`, and the
+/// remote cost is a single `find -print0` with no `sha256sum` fan-out.
+pub fn walk_local_paths(
+    root: &Path,
+    base_name: &Path,
+    excludes: &GlobSet,
+) -> Result<HashSet<PathBuf>> {
+    let meta = match std::fs::symlink_metadata(root) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(e).with_context(|| format!("stat {}", root.display())),
+    };
+    let mut out = HashSet::new();
+    if meta.is_file() {
+        out.insert(base_name.to_path_buf());
+        return Ok(out);
+    }
+    if !meta.is_dir() {
+        return Ok(out);
+    }
+    for entry in WalkDir::new(root) {
+        let entry = entry.with_context(|| format!("walking {}", root.display()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let rel_inside = path
+            .strip_prefix(root)
+            .with_context(|| format!("relativising {}", path.display()))?;
+        if is_excluded(rel_inside, excludes) {
+            continue;
+        }
+        out.insert(base_name.join(rel_inside));
+    }
+    Ok(out)
+}
+
+/// Build the paths-only counterpart of [`remote_walk_command_safe`]: same
+/// directory check and prune logic but stopping at `-print0`, since the
+/// hook never needs the hashes.
+pub fn remote_paths_walk_command_safe(root: &str, name_only_excludes: &[String]) -> String {
+    let mut cmd = format!("cd {} && find . ", shell_quote(root));
+    if !name_only_excludes.is_empty() {
+        cmd.push_str("\\( ");
+        for (i, pat) in name_only_excludes.iter().enumerate() {
+            if i > 0 {
+                cmd.push_str(" -o ");
+            }
+            cmd.push_str(&format!("-name {}", shell_quote(pat)));
+        }
+        cmd.push_str(" \\) -prune -o ");
+    }
+    cmd.push_str("-type f -print0");
+    format!("if [ -d {} ]; then {cmd}; fi", shell_quote(root))
+}
+
+/// Parse the NUL-separated `find -print0` output into a path set.
+pub fn parse_paths_walk_output(text: &str, base_name: &Path) -> HashSet<PathBuf> {
+    let mut out = HashSet::new();
+    for rel in text.split('\0') {
+        if rel.is_empty() {
+            continue;
+        }
+        let trimmed = rel.trim_start_matches("./");
+        out.insert(base_name.join(trimmed));
+    }
+    out
+}
+
+/// Compute a path-only change set: two `Path` sets in, one classified list
+/// out. Used by the hook gate, which only needs the per-entry op for
+/// policy evaluation, not the eventual `Skip`-vs-`Update` distinction.
+pub fn compute_paths(
+    source: &HashSet<PathBuf>,
+    dest: &HashSet<PathBuf>,
+    mirror: bool,
+) -> Vec<Entry> {
+    let mut entries: Vec<Entry> = Vec::with_capacity(source.len());
+    for rel in source {
+        let op = if dest.contains(rel) {
+            ChangeOp::Update
+        } else {
+            ChangeOp::Create
+        };
+        entries.push(Entry {
+            op,
+            rel_path: rel.clone(),
+        });
+    }
+    if mirror {
+        for rel in dest {
+            if !source.contains(rel) {
+                entries.push(Entry {
+                    op: ChangeOp::Delete,
+                    rel_path: rel.clone(),
+                });
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    entries
 }
 
 /// Hash a single file with sha-256. Read into a small buffer so even very

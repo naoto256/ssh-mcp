@@ -43,8 +43,8 @@ async fn serve() -> Result<()> {
 
     // Both loops run forever; if either returns it is a fatal error.
     tokio::select! {
-        result = mcp_loop(mcp_listener, own_uid, pool, config_path.clone(), audit.clone()) => result,
-        result = control_loop(control_listener, own_uid, evaluator, config_path, audit) => result,
+        result = mcp_loop(mcp_listener, own_uid, pool.clone(), config_path.clone(), audit.clone()) => result,
+        result = control_loop(control_listener, own_uid, evaluator, pool, config_path, audit) => result,
     }
 }
 
@@ -104,6 +104,7 @@ async fn control_loop(
     listener: UnixListener,
     own_uid: u32,
     evaluator: Arc<Evaluator>,
+    pool: Arc<ConnectionPool>,
     config_path: PathBuf,
     audit: AuditLog,
 ) -> Result<()> {
@@ -120,10 +121,11 @@ async fn control_loop(
             continue;
         }
         let evaluator = evaluator.clone();
+        let pool = pool.clone();
         let config_path = config_path.clone();
         let audit = audit.clone();
         tokio::spawn(async move {
-            control::handle_connection(stream, &config_path, &evaluator, &audit).await;
+            control::handle_connection(stream, &config_path, &evaluator, &pool, &audit).await;
         });
     }
 }
