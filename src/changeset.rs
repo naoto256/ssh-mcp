@@ -283,11 +283,13 @@ pub fn remote_paths_walk_command_safe(root: &str, name_only_excludes: &[String])
 pub fn remote_walk_command_safe_windows(root: &str, name_only_excludes: &[String]) -> String {
     let script = format!(
         "$ErrorActionPreference = 'Stop'\n\
+         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()\n\
          $root = '{root}'\n\
          if (-not (Test-Path -LiteralPath $root -PathType Container)) {{ return }}\n\
+         $rootAbs = (Resolve-Path -LiteralPath $root).Path\n\
          $excludes = @({excludes})\n\
-         $prefix = $root.TrimEnd('\\').Length + 1\n\
-         Get-ChildItem -LiteralPath $root -File -Recurse -Force | Where-Object {{\n\
+         $prefix = $rootAbs.TrimEnd('\\').Length + 1\n\
+         Get-ChildItem -LiteralPath $rootAbs -File -Recurse -Force | Where-Object {{\n\
            $segments = $_.FullName.Substring($prefix).Split([char[]]@('\\','/'))\n\
            $skip = $false\n\
            foreach ($seg in $segments) {{\n\
@@ -318,11 +320,13 @@ pub fn remote_paths_walk_command_safe_windows(
 ) -> String {
     let script = format!(
         "$ErrorActionPreference = 'Stop'\n\
+         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()\n\
          $root = '{root}'\n\
          if (-not (Test-Path -LiteralPath $root -PathType Container)) {{ return }}\n\
+         $rootAbs = (Resolve-Path -LiteralPath $root).Path\n\
          $excludes = @({excludes})\n\
-         $prefix = $root.TrimEnd('\\').Length + 1\n\
-         Get-ChildItem -LiteralPath $root -File -Recurse -Force | Where-Object {{\n\
+         $prefix = $rootAbs.TrimEnd('\\').Length + 1\n\
+         Get-ChildItem -LiteralPath $rootAbs -File -Recurse -Force | Where-Object {{\n\
            $segments = $_.FullName.Substring($prefix).Split([char[]]@('\\','/'))\n\
            $skip = $false\n\
            foreach ($seg in $segments) {{\n\
