@@ -414,16 +414,18 @@ pub async fn remote_is_dir(mut channel: Channel<client::Msg>, path: &str) -> Res
     Ok(exit_code == 0)
 }
 
-/// Windows counterpart of [`remote_is_dir`]. The classic cmd.exe idiom
-/// `if exist "PATH\NUL"` returns true only when `PATH` is a directory —
-/// `NUL` is a device that pseudo-exists inside every real directory but
-/// not inside a regular file. Exit code conveys the answer with no parse.
+/// Windows counterpart of [`remote_is_dir`]. The classic `\NUL` idiom
+/// turns out to be broken on Windows 11 ARM (every directory tests
+/// false), so the wildcard probe `PATH\*` is used instead: cmd.exe's
+/// `if exist` matches the wildcard against directory contents, which
+/// returns true for any directory (empty included) and false for files
+/// or missing paths. Exit code conveys the answer with no parse.
 pub async fn remote_is_dir_windows(
     mut channel: Channel<client::Msg>,
     path: &str,
 ) -> Result<bool> {
     let command = format!(
-        "if exist {}\\NUL (exit /b 0) else (exit /b 1)",
+        "if exist {}\\* (exit /b 0) else (exit /b 1)",
         cmd_quote(path)
     );
     channel
@@ -746,8 +748,9 @@ fn resolve_upload_target_windows(
 /// Upload to a Windows remote. The local side builds the gzip-tar archive
 /// the same way as for POSIX; the remote side untars it through cmd.exe +
 /// `tar.exe` (the libarchive build that has shipped with Windows since
-/// 10 1803). `chcp 65001` flips the console code page so UTF-8 file names
-/// in the archive land on NTFS unscathed.
+/// 10 1803). Command chain: `mkdir` (with intermediate creation, error
+/// silenced for existing target) followed by `tar -C DIR -xzf -`, with
+/// `-C` placed *before* `-xzf -` so bsdtar treats it as an option.
 pub async fn upload_windows(
     mut channel: Channel<client::Msg>,
     local_path: &Path,
@@ -775,11 +778,8 @@ pub async fn upload_windows(
         .context("sizing the archive")?
         .len();
 
-    // `mkdir` succeeds with command extensions creating intermediate
-    // directories; an existing target makes it error out, which we discard
-    // through `2>nul`. The `&` (not `&&`) keeps the chain going regardless.
     let command = format!(
-        "chcp 65001 >nul & mkdir {dir} 2>nul & cd /d {dir} && tar.exe -xzf -",
+        "mkdir {dir} 2>nul & tar.exe -C {dir} -xzf -",
         dir = cmd_quote(&dir)
     );
     let input =
@@ -812,10 +812,9 @@ pub async fn download_windows(
 
     // tar.exe's `--exclude` accepts the same name-pattern shape as GNU tar
     // (libarchive parity), so the existing exclude list flows through.
-    let mut command = format!(
-        "chcp 65001 >nul & cd /d {dir} && tar.exe -czf -",
-        dir = cmd_quote(&dir)
-    );
+    // Symmetric to upload_windows: tar.exe with `-C` placed before the
+    // `-czf -` so bsdtar treats it as an option, not a positional file.
+    let mut command = format!("tar.exe -C {dir} -czf -", dir = cmd_quote(&dir));
     for pattern in exclude {
         command.push_str(&format!(" --exclude={}", cmd_quote(pattern)));
     }
@@ -962,6 +961,42 @@ mod tests {
         let dest = dir.path().join("result.txt");
         unpack(&archive, "renamed.txt", &dest).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"hello transfer");
+    }
+
+    #[test]
+    fn diagnostic_pack_entry_names() {
+        // Dump the entry names a `pack()` produces so we can confirm
+        // whether the archive really carries the requested top-level
+        // directory prefix.
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("proj");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("Cargo.toml"), b"config").unwrap();
+        std::fs::create_dir(source.join("src")).unwrap();
+        std::fs::write(source.join("src").join("main.rs"), b"code").unwrap();
+
+        let archive = dir.path().join("bundle.tar");
+        pack(&source, "proj", &archive, &GlobSet::empty()).unwrap();
+
+        let file = std::fs::File::open(&archive).unwrap();
+        let mut ar = Archive::new(GzDecoder::new(file));
+        let mut names: Vec<String> = ar
+            .entries()
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                e.path().unwrap().to_string_lossy().into_owned()
+            })
+            .collect();
+        names.sort();
+        println!("ARCHIVE_ENTRIES: {names:?}");
+        // The assertion: every entry must be under `proj/`.
+        for name in &names {
+            assert!(
+                name.starts_with("proj"),
+                "entry {name:?} is missing the proj/ prefix"
+            );
+        }
     }
 
     #[test]
