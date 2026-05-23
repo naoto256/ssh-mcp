@@ -113,8 +113,23 @@ impl ConnectionPool {
         command: &str,
         timeout: Duration,
     ) -> Result<ExecOutput> {
+        let pc = self.get_or_connect(config, host_alias).await?;
         let mut channel = self.open_session(config, host_alias).await?;
-        run_command(&mut channel, command, timeout).await
+        // Windows: switch the cmd.exe code page to UTF-8 before running
+        // the caller's command so JP-locale stdout/stderr from regular
+        // programs does not arrive mojibake'd through the daemon's UTF-8
+        // decode. `chcp` only affects the current cmd.exe instance (one
+        // per exec) so this does not leak across calls. cmd.exe's *own*
+        // localised error messages ("'X' is not recognized as an
+        // internal or external command...") bypass the active code page
+        // and stay in the system default; that is a cmd.exe quirk, not
+        // something we can fix from here. To cover those the daemon
+        // would need to wrap commands in PowerShell or decode as CP932.
+        let effective = match pc.os {
+            RemoteOs::Posix => command.to_string(),
+            RemoteOs::Windows => format!("chcp 65001 >nul & {command}"),
+        };
+        run_command(&mut channel, &effective, timeout).await
     }
 
     /// Download a remote file or directory to `local_path`.
