@@ -80,6 +80,14 @@ pub struct ExecResult {
     /// Total number of stderr lines produced, before the `op` filtered any
     /// out. `stderr.len()` is the kept count.
     pub stderr_lines: u32,
+    /// Advisory note from the daemon. Currently emitted when the command's
+    /// last unquoted pipe targets a line-scoping program (`tail`, `head`,
+    /// `grep`, `egrep`, `fgrep`, `rg`) — the shell will have already
+    /// dropped everything past that pipe, so the trace buffer only holds
+    /// the post-pipe slice. Pass the scope through `op` instead and let
+    /// `trace` re-scope from the full stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Arguments to `trace`.
@@ -307,7 +315,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "exec",
-        description = "Run a shell command on a host from list_hosts and return its exit code with op-scoped stdout/stderr. Each call is stateless — no working directory or shell state carries to the next call, so use 'cd /path && cmd' when a directory matters. The op parameter is required: pass tail/head/grep so the returned slice is deliberately scoped. **Do not also pipe through tail/head/grep in the shell command** — op is the canonical scope, and the full unscoped stdout/stderr is retained in the per-session trace buffer so you can re-scope through `trace` later. Double-scoping defeats the trace path: it throws away the very output you might want to inspect with a different filter. Each call has a time limit (default 600s); for a longer-running job, start it detached and poll for completion — e.g. \"nohup sh -c 'long-cmd; echo $? > /tmp/job.rc' > /tmp/job.out 2>&1 &\", then read /tmp/job.rc on later calls."
+        description = "**DO NOT pipe through `tail` / `head` / `grep` in the shell command — pass an `op` instead.** Those pipes scope at the shell level and throw away the bytes `trace` would have shown; the `op` parameter scopes at the tool level and the full unscoped stdout/stderr is retained in the per-session trace buffer for re-scoping. Pipes to scoping programs trigger an advisory `note` on the result.\n\nRun a shell command on a host from list_hosts and return its exit code with op-scoped stdout/stderr. Each call is stateless — no working directory or shell state carries to the next call, so use 'cd /path && cmd' when a directory matters. The `op` parameter is required: pass `tail` / `head` / `grep` so the returned slice is deliberately scoped. Each call has a time limit (default 600s); for a longer-running job, start it detached and poll for completion — e.g. \"nohup sh -c 'long-cmd; echo $? > /tmp/job.rc' > /tmp/job.out 2>&1 &\", then read /tmp/job.rc on later calls."
     )]
     async fn exec(&self, params: Parameters<ExecParams>) -> Result<Json<ExecResult>, String> {
         let ExecParams { host, command, op } = params.0;
@@ -358,12 +366,20 @@ impl SshMcpServer {
 
         let (stdout, stdout_lines) = op.apply(stdout_all)?;
         let (stderr, stderr_lines) = op.apply(stderr_all)?;
+        let note = detect_trailing_scope_pipe(&command).map(|program| {
+            format!(
+                "the command ends in `| {program}` — the shell scoped the output before the \
+                 daemon saw it, so the trace buffer only holds what survived the pipe. Pass \
+                 `op` (tail/head/grep) instead and let `trace` re-scope from the full stream."
+            )
+        });
         Ok(Json(ExecResult {
             exit_code: output.exit_code,
             stdout,
             stdout_lines,
             stderr,
             stderr_lines,
+            note,
         }))
     }
 
@@ -750,5 +766,116 @@ impl ServerHandler for SshMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("ssh-mcp", env!("CARGO_PKG_VERSION")))
+    }
+}
+
+/// If the command's last unquoted pipe targets a line-scoping program,
+/// return that program's name. The intent is to recognise the
+/// "double-scoping" anti-pattern — piping through `tail` / `head` / `grep`
+/// when the `op` parameter exists for exactly that purpose — and surface
+/// an advisory `note` to the caller. Best-effort: a naive quote-aware scan
+/// is enough to catch the common cases without growing a shell parser.
+fn detect_trailing_scope_pipe(command: &str) -> Option<&'static str> {
+    let bytes = command.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut last_pipe: Option<usize> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b'\\' if !in_single && i + 1 < bytes.len() => {
+                // Skip the escaped byte. (Inside single quotes `\` is
+                // literal, so we only honour escapes outside single
+                // quoting.)
+                i += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'|' if !in_single && !in_double => {
+                // `||` is logical-or, not a pipe — skip both bytes.
+                if bytes.get(i + 1) == Some(&b'|') {
+                    i += 2;
+                    continue;
+                }
+                last_pipe = Some(i);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let idx = last_pipe?;
+    let after = &command[idx + 1..].trim_start();
+    let first_word = after
+        .split(|c: char| c.is_whitespace())
+        .find(|w| !w.is_empty())?;
+    match first_word {
+        "tail" => Some("tail"),
+        "head" => Some("head"),
+        "grep" => Some("grep"),
+        "egrep" => Some("egrep"),
+        "fgrep" => Some("fgrep"),
+        "rg" => Some("rg"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_a_trailing_tail_pipe() {
+        assert_eq!(
+            detect_trailing_scope_pipe("ls -la | tail -5"),
+            Some("tail")
+        );
+    }
+
+    #[test]
+    fn detects_a_trailing_grep_after_an_unrelated_pipe() {
+        // The model used awk to extract, then grep to scope — the *last*
+        // pipe is the one that mattered for the advisory.
+        assert_eq!(
+            detect_trailing_scope_pipe("ls | awk '{print $1}' | grep foo"),
+            Some("grep")
+        );
+    }
+
+    #[test]
+    fn ignores_a_pipe_inside_quotes() {
+        // The `|` lives inside single quotes — not a real pipe operator.
+        assert!(detect_trailing_scope_pipe("echo 'a | tail'").is_none());
+        assert!(detect_trailing_scope_pipe(r#"echo "a | grep b""#).is_none());
+    }
+
+    #[test]
+    fn ignores_logical_or() {
+        // `||` is logical-or, not a pipe.
+        assert!(detect_trailing_scope_pipe("cmd1 || cmd2").is_none());
+    }
+
+    #[test]
+    fn ignores_unrelated_trailing_pipe_targets() {
+        // `wc` and `sort` aren't on the scoping list; the model using them
+        // is doing something different, not double-scoping.
+        assert!(detect_trailing_scope_pipe("ls | wc -l").is_none());
+        assert!(detect_trailing_scope_pipe("ls | sort").is_none());
+    }
+
+    #[test]
+    fn detects_through_a_redirect_block_correctly() {
+        // The `2>&1` is not a pipe; the last real pipe still targets head.
+        assert_eq!(
+            detect_trailing_scope_pipe("cmd 2>&1 | head -3"),
+            Some("head")
+        );
+    }
+
+    #[test]
+    fn returns_none_when_there_is_no_pipe() {
+        assert!(detect_trailing_scope_pipe("ls -la").is_none());
+        assert!(detect_trailing_scope_pipe("echo hi; echo bye").is_none());
     }
 }
