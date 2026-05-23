@@ -133,11 +133,15 @@ impl ConnectionPool {
         timeout: Duration,
     ) -> Result<TransferStats> {
         let pc = self.get_or_connect(config, host_alias).await?;
-        if matches!(pc.os, RemoteOs::Windows) {
-            bail!(unsupported_windows_message("get"));
-        }
         let channel = self.open_session(config, host_alias).await?;
-        transfer::download(channel, remote_path, local_path, exclude, timeout).await
+        match pc.os {
+            RemoteOs::Posix => {
+                transfer::download(channel, remote_path, local_path, exclude, timeout).await
+            }
+            RemoteOs::Windows => {
+                transfer::download_windows(channel, remote_path, local_path, exclude, timeout).await
+            }
+        }
     }
 
     /// Synchronise a local directory into a remote location, mirroring it:
@@ -282,26 +286,41 @@ impl ConnectionPool {
         timeout: Duration,
     ) -> Result<TransferStats> {
         let pc = self.get_or_connect(config, host_alias).await?;
-        if matches!(pc.os, RemoteOs::Windows) {
-            bail!(unsupported_windows_message("put"));
-        }
         // The destination resolution depends on whether `remote_path` is an
         // existing directory, which only the remote can tell us. The probe
         // and the transfer each get their own channel — channels are
         // single-use under russh, and the connection is pooled so there is no
         // round-trip for the second open.
         let probe = self.open_session(config, host_alias).await?;
-        let remote_is_dir = transfer::remote_is_dir(probe, remote_path).await?;
+        let remote_is_dir = match pc.os {
+            RemoteOs::Posix => transfer::remote_is_dir(probe, remote_path).await?,
+            RemoteOs::Windows => transfer::remote_is_dir_windows(probe, remote_path).await?,
+        };
         let channel = self.open_session(config, host_alias).await?;
-        transfer::upload(
-            channel,
-            local_path,
-            remote_path,
-            remote_is_dir,
-            exclude,
-            timeout,
-        )
-        .await
+        match pc.os {
+            RemoteOs::Posix => {
+                transfer::upload(
+                    channel,
+                    local_path,
+                    remote_path,
+                    remote_is_dir,
+                    exclude,
+                    timeout,
+                )
+                .await
+            }
+            RemoteOs::Windows => {
+                transfer::upload_windows(
+                    channel,
+                    local_path,
+                    remote_path,
+                    remote_is_dir,
+                    exclude,
+                    timeout,
+                )
+                .await
+            }
+        }
     }
 
     /// Open a fresh channel on a host's pooled connection. A dead pooled

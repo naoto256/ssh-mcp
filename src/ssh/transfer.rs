@@ -414,6 +414,31 @@ pub async fn remote_is_dir(mut channel: Channel<client::Msg>, path: &str) -> Res
     Ok(exit_code == 0)
 }
 
+/// Windows counterpart of [`remote_is_dir`]. The classic cmd.exe idiom
+/// `if exist "PATH\NUL"` returns true only when `PATH` is a directory —
+/// `NUL` is a device that pseudo-exists inside every real directory but
+/// not inside a regular file. Exit code conveys the answer with no parse.
+pub async fn remote_is_dir_windows(
+    mut channel: Channel<client::Msg>,
+    path: &str,
+) -> Result<bool> {
+    let command = format!(
+        "if exist {}\\NUL (exit /b 0) else (exit /b 1)",
+        cmd_quote(path)
+    );
+    channel
+        .exec(true, command)
+        .await
+        .context("the remote test request failed")?;
+    let mut exit_code = -1;
+    while let Some(message) = channel.wait().await {
+        if let ChannelMsg::ExitStatus { exit_status } = message {
+            exit_code = exit_status as i32;
+        }
+    }
+    Ok(exit_code == 0)
+}
+
 /// Run the remote archive command and stream its stdout to `sink`, returning
 /// the remote result and the number of bytes written.
 async fn run_download<W: AsyncWrite + Unpin>(
@@ -650,6 +675,171 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+/// Quote a string as a single cmd.exe argument. cmd uses `"..."` for
+/// quoting and treats `"` inside as the only escape that matters; `\` is
+/// literal (unlike POSIX). We do not try to defend against weirdness like
+/// embedded `%VAR%` expansion or trailing backslashes inside quotes — those
+/// are not meaningful in any path we expect a model to pass us. The path's
+/// own forward / backward slashes are left alone; bsdtar and `cd /d` both
+/// accept either separator.
+fn cmd_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+/// Split a Windows-style remote path into the directory it sits under and
+/// its base name. Both `/` and `\` are accepted as separators — the user
+/// or the remote can use either. The output keeps whichever slash was in
+/// the input, so the path reads naturally back to the caller.
+fn split_remote_windows(path: &str) -> Result<(String, String)> {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        bail!("the remote path {path:?} is empty or the filesystem root");
+    }
+    let (dir, base) = match trimmed.rfind(['/', '\\']) {
+        Some(i) => {
+            let raw_dir = &trimmed[..i];
+            let dir = if raw_dir.is_empty() {
+                // Path was something like `\foo` — root of the current drive.
+                "\\".to_string()
+            } else if raw_dir.len() == 2 && raw_dir.as_bytes()[1] == b':' {
+                // Drive-rooted path like `C:\foo` — keep the trailing slash
+                // so `cd /d C:\` works.
+                format!("{raw_dir}\\")
+            } else {
+                raw_dir.to_string()
+            };
+            (dir, trimmed[i + 1..].to_string())
+        }
+        None => (".".to_string(), trimmed.to_string()),
+    };
+    if base.is_empty() || base == "." || base == ".." {
+        bail!("the remote path {path:?} has no usable file name");
+    }
+    Ok((dir, base))
+}
+
+/// Resolve where an uploaded archive should land on a Windows remote. Same
+/// cp-merge semantics as the POSIX side, just with Windows path splitting.
+fn resolve_upload_target_windows(
+    local_path: &Path,
+    remote_path: &str,
+    remote_is_existing_dir: bool,
+) -> Result<(String, String)> {
+    if remote_is_existing_dir {
+        let local_base = local_path
+            .file_name()
+            .ok_or_else(|| anyhow!("the local path {} has no file name", local_path.display()))?
+            .to_string_lossy()
+            .into_owned();
+        let dir = remote_path.trim_end_matches(['/', '\\']);
+        let dir = if dir.is_empty() {
+            "\\".to_string()
+        } else {
+            dir.to_string()
+        };
+        Ok((dir, local_base))
+    } else {
+        split_remote_windows(remote_path)
+    }
+}
+
+/// Upload to a Windows remote. The local side builds the gzip-tar archive
+/// the same way as for POSIX; the remote side untars it through cmd.exe +
+/// `tar.exe` (the libarchive build that has shipped with Windows since
+/// 10 1803). `chcp 65001` flips the console code page so UTF-8 file names
+/// in the archive land on NTFS unscathed.
+pub async fn upload_windows(
+    mut channel: Channel<client::Msg>,
+    local_path: &Path,
+    remote_path: &str,
+    remote_is_existing_dir: bool,
+    exclude: &[String],
+    timeout: Duration,
+) -> Result<TransferStats> {
+    if !local_path.exists() {
+        bail!("the local path {} does not exist", local_path.display());
+    }
+    let excludes = compile_excludes(exclude)?;
+
+    let (dir, base) = resolve_upload_target_windows(local_path, remote_path, remote_is_existing_dir)?;
+    let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
+    let archive = tar_file.path().to_path_buf();
+    let source = local_path.to_path_buf();
+    let entry = base.clone();
+    tokio::task::spawn_blocking(move || pack(&source, &entry, &archive, &excludes))
+        .await
+        .context("the archive creation task failed")??;
+    let bytes = tar_file
+        .as_file()
+        .metadata()
+        .context("sizing the archive")?
+        .len();
+
+    // `mkdir` succeeds with command extensions creating intermediate
+    // directories; an existing target makes it error out, which we discard
+    // through `2>nul`. The `&` (not `&&`) keeps the chain going regardless.
+    let command = format!(
+        "chcp 65001 >nul & mkdir {dir} 2>nul & cd /d {dir} && tar.exe -xzf -",
+        dir = cmd_quote(&dir)
+    );
+    let input =
+        tokio::fs::File::from_std(tar_file.reopen().context("opening the temporary archive")?);
+
+    let result = tokio::time::timeout(timeout, run_upload(&mut channel, &command, input))
+        .await
+        .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
+    check_remote(&result)?;
+    Ok(TransferStats { bytes })
+}
+
+/// Download from a Windows remote. The remote runs `tar.exe -czf -` to
+/// produce a gzip-tar archive on stdout; the local side extracts it the
+/// same way as for POSIX, so the cp-merge resolution and the staging-then-
+/// rename promote logic carry over without change.
+pub async fn download_windows(
+    mut channel: Channel<client::Msg>,
+    remote_path: &str,
+    local_path: &Path,
+    exclude: &[String],
+    timeout: Duration,
+) -> Result<TransferStats> {
+    let (dir, base) = split_remote_windows(remote_path)?;
+    let target = resolve_download_target(local_path, &base);
+    let parent = local_parent(&target);
+    if !parent.is_dir() {
+        bail!("the local directory {} does not exist", parent.display());
+    }
+
+    // tar.exe's `--exclude` accepts the same name-pattern shape as GNU tar
+    // (libarchive parity), so the existing exclude list flows through.
+    let mut command = format!(
+        "chcp 65001 >nul & cd /d {dir} && tar.exe -czf -",
+        dir = cmd_quote(&dir)
+    );
+    for pattern in exclude {
+        command.push_str(&format!(" --exclude={}", cmd_quote(pattern)));
+    }
+    command.push_str(&format!(" -- {}", cmd_quote(&base)));
+
+    let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
+    let mut sink =
+        tokio::fs::File::from_std(tar_file.reopen().context("opening the temporary archive")?);
+
+    let (result, bytes) =
+        tokio::time::timeout(timeout, run_download(&mut channel, &command, &mut sink))
+            .await
+            .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
+    check_remote(&result)?;
+
+    let archive = tar_file.path().to_path_buf();
+    let dest = target;
+    let entry = base.clone();
+    tokio::task::spawn_blocking(move || unpack(&archive, &entry, &dest))
+        .await
+        .context("the archive extraction task failed")??;
+    Ok(TransferStats { bytes })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,6 +849,82 @@ mod tests {
         assert_eq!(shell_quote("plain"), "'plain'");
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn cmd_quote_wraps_and_escapes() {
+        // cmd uses `"..."` for quoting; `"` inside is escaped by doubling.
+        // Backslashes are literal — paths like `C:\foo bar` work as-is.
+        assert_eq!(cmd_quote("plain"), "\"plain\"");
+        assert_eq!(cmd_quote("C:\\foo bar"), "\"C:\\foo bar\"");
+        assert_eq!(cmd_quote("a\"b"), "\"a\"\"b\"");
+    }
+
+    #[test]
+    fn split_remote_windows_handles_each_shape() {
+        // Drive-rooted paths keep their drive in the dir half so `cd /d`
+        // works on either slash style.
+        assert_eq!(
+            split_remote_windows("C:\\Users\\naoto\\proj").unwrap(),
+            ("C:\\Users\\naoto".to_string(), "proj".to_string())
+        );
+        assert_eq!(
+            split_remote_windows("C:/Users/naoto/proj").unwrap(),
+            ("C:/Users/naoto".to_string(), "proj".to_string())
+        );
+        // Drive root: dir is `C:\` so `cd /d C:\` lands at the drive root.
+        assert_eq!(
+            split_remote_windows("C:\\app").unwrap(),
+            ("C:\\".to_string(), "app".to_string())
+        );
+        // Bare drive-letterless root.
+        assert_eq!(
+            split_remote_windows("\\app").unwrap(),
+            ("\\".to_string(), "app".to_string())
+        );
+        // Bare name relative to the SSH login directory.
+        assert_eq!(
+            split_remote_windows("app").unwrap(),
+            (".".to_string(), "app".to_string())
+        );
+        // A trailing slash is stripped; the rest of the split is unchanged.
+        assert_eq!(
+            split_remote_windows("C:\\app\\").unwrap(),
+            ("C:\\".to_string(), "app".to_string())
+        );
+        // Mixed separators are normalised by taking whichever the last one
+        // is — both work for tar and cd.
+        assert_eq!(
+            split_remote_windows("C:\\Users/naoto\\proj").unwrap(),
+            ("C:\\Users/naoto".to_string(), "proj".to_string())
+        );
+        assert!(split_remote_windows("").is_err());
+        assert!(split_remote_windows("\\").is_err());
+    }
+
+    #[test]
+    fn resolve_upload_target_windows_handles_dir_and_replace() {
+        let local = Path::new("/Users/naoto/code/proj");
+        // Existing remote directory: the local entry lands inside under
+        // its own basename.
+        let (dir, base) = resolve_upload_target_windows(
+            local,
+            "C:\\Users\\naoto\\workspaces",
+            true,
+        )
+        .unwrap();
+        assert_eq!(dir, "C:\\Users\\naoto\\workspaces");
+        assert_eq!(base, "proj");
+        // Non-existing target: replace semantics. The local entry takes
+        // the remote name.
+        let (dir, base) = resolve_upload_target_windows(
+            local,
+            "C:\\Users\\naoto\\dist",
+            false,
+        )
+        .unwrap();
+        assert_eq!(dir, "C:\\Users\\naoto");
+        assert_eq!(base, "dist");
     }
 
     #[test]
