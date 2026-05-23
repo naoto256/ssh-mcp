@@ -199,6 +199,100 @@ async fn put_file_into_existing_directory_lands_inside() {
 
 #[tokio::test]
 #[ignore = "requires a reachable SSH host supplied via env vars"]
+async fn sync_put_mirrors_a_local_directory_to_a_remote() {
+    // sync_put treats `remote` as the destination root. The first push
+    // creates the tree; the second push (after deleting a file locally)
+    // should delete the matching file remotely while skipping the
+    // unchanged ones.
+    let config = test_config();
+    let pool = ConnectionPool::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+
+    let source = dir.path().join("proj");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("a.txt"), b"alpha").unwrap();
+    std::fs::write(source.join("b.txt"), b"bravo").unwrap();
+    std::fs::create_dir(source.join("sub")).unwrap();
+    std::fs::write(source.join("sub").join("c.txt"), b"charlie").unwrap();
+
+    let remote = remote_path("sync-put");
+    let first = pool
+        .sync_put(&config, "target", &source, &remote, &[], TIMEOUT)
+        .await
+        .expect("first sync_put should succeed");
+    let counts = first.change_set.counts();
+    assert_eq!(counts.created, 3);
+    assert_eq!(counts.deleted, 0);
+
+    std::fs::remove_file(source.join("b.txt")).unwrap();
+    let second = pool
+        .sync_put(&config, "target", &source, &remote, &[], TIMEOUT)
+        .await
+        .expect("second sync_put should succeed");
+    let counts = second.change_set.counts();
+    assert_eq!(counts.deleted, 1);
+    assert_eq!(counts.skipped, 2);
+
+    // Listing on the remote confirms b.txt is gone.
+    let listing = pool
+        .exec(
+            &config,
+            "target",
+            &format!("ls {remote}; ls {remote}/sub"),
+            TIMEOUT,
+        )
+        .await
+        .expect("ls should succeed");
+    assert!(listing.stdout.contains("a.txt"));
+    assert!(!listing.stdout.contains("b.txt"));
+    assert!(listing.stdout.contains("c.txt"));
+
+    pool.exec(&config, "target", &format!("rm -rf {remote}"), TIMEOUT)
+        .await
+        .ok();
+}
+
+#[tokio::test]
+#[ignore = "requires a reachable SSH host supplied via env vars"]
+async fn sync_get_mirrors_a_remote_directory_to_a_local() {
+    // sync_get treats both paths as roots and mirrors the remote tree into
+    // the local one — stale local files at the same root are deleted.
+    let config = test_config();
+    let pool = ConnectionPool::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+
+    // Seed the remote directly with a sync_put.
+    let seed = dir.path().join("seed");
+    std::fs::create_dir(&seed).unwrap();
+    std::fs::write(seed.join("a.txt"), b"alpha").unwrap();
+    std::fs::write(seed.join("b.txt"), b"bravo").unwrap();
+    let remote = remote_path("sync-get");
+    pool.sync_put(&config, "target", &seed, &remote, &[], TIMEOUT)
+        .await
+        .expect("seed sync_put should succeed");
+
+    let local_dest = dir.path().join("local");
+    std::fs::create_dir(&local_dest).unwrap();
+    std::fs::write(local_dest.join("stale.txt"), b"old").unwrap();
+
+    let result = pool
+        .sync_get(&config, "target", &remote, &local_dest, &[], TIMEOUT)
+        .await
+        .expect("sync_get should succeed");
+    let counts = result.change_set.counts();
+    assert_eq!(counts.created, 2);
+    assert_eq!(counts.deleted, 1);
+
+    assert_eq!(std::fs::read(local_dest.join("a.txt")).unwrap(), b"alpha");
+    assert!(!local_dest.join("stale.txt").exists());
+
+    pool.exec(&config, "target", &format!("rm -rf {remote}"), TIMEOUT)
+        .await
+        .ok();
+}
+
+#[tokio::test]
+#[ignore = "requires a reachable SSH host supplied via env vars"]
 async fn put_file_skips_excluded_entries() {
     let config = test_config();
     let pool = ConnectionPool::new().unwrap();

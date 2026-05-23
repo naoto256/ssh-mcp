@@ -5,6 +5,7 @@
 //! daemon's policy evaluator.
 
 pub mod audit;
+pub mod changeset;
 pub mod config;
 pub mod control;
 pub mod daemon;

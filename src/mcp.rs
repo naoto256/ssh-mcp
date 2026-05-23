@@ -157,6 +157,18 @@ pub struct TransferResult {
     pub bytes: u64,
 }
 
+/// The result of a `sync_get` / `sync_put` call: archive payload size plus
+/// per-op counts derived from the change set. The full per-file list is
+/// kept in the trace buffer; call `trace` to drill in.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SyncResult {
+    pub bytes: u64,
+    pub created: u32,
+    pub updated: u32,
+    pub deleted: u32,
+    pub skipped: u32,
+}
+
 /// One MCP session's view of the daemon. Cheap to clone — it shares the
 /// daemon's connection pool and the per-session trace buffer, and adds the
 /// per-session tool router.
@@ -376,6 +388,173 @@ impl SshMcpServer {
 
         let stats = result.map_err(|e| format!("{e:#}"))?;
         Ok(Json(TransferResult { bytes: stats.bytes }))
+    }
+
+    #[tool(
+        name = "sync_get",
+        description = "Mirror a remote directory into a local location. Files on the local side that are absent from the remote source are deleted; files that match by sha256 are skipped. The local destination follows the same cp/rsync rule as get_file (place inside an existing directory, otherwise take its name). The remote source must be a directory. Returns per-op counts; call trace for the full per-file list. The host's configured exclude patterns are always skipped; pass exclude to add more globs for this call."
+    )]
+    async fn sync_get(
+        &self,
+        params: Parameters<GetFileParams>,
+    ) -> Result<Json<SyncResult>, String> {
+        let GetFileParams {
+            host,
+            remote_path,
+            local_path,
+            exclude,
+        } = params.0;
+        let config = HostsConfig::load(&self.config_path).map_err(|e| format!("{e:#}"))?;
+        let (timeout, mut excludes) = match config.host(&host) {
+            Some(entry) => (
+                Duration::from_secs(config.exec_timeout_secs(entry)),
+                entry.exclude.clone(),
+            ),
+            None => return Err(format!("unknown host {host:?}")),
+        };
+        excludes.extend(exclude);
+        let remote = pathnorm::normalize_remote(&remote_path).map_err(|e| format!("{e:#}"))?;
+        let local = pathnorm::normalize_local(&local_path).map_err(|e| format!("{e:#}"))?;
+
+        let result = self
+            .pool
+            .sync_get(&config, &host, &remote, &local, &excludes, timeout)
+            .await;
+        let local_display = local.to_string_lossy();
+        match &result {
+            Ok(sr) => self.audit.record_transfer(
+                "sync_get",
+                &host,
+                &remote,
+                &local_display,
+                Some(sr.bytes),
+                None,
+            ),
+            Err(error) => {
+                let message = format!("{error:#}");
+                self.audit.record_transfer(
+                    "sync_get",
+                    &host,
+                    &remote,
+                    &local_display,
+                    None,
+                    Some(&message),
+                );
+            }
+        }
+        let sr = result.map_err(|e| format!("{e:#}"))?;
+        let counts = sr.change_set.counts();
+        self.record_transfer_trace("sync_get", &host, &remote, &local_display, &sr)
+            .await;
+        Ok(Json(SyncResult {
+            bytes: sr.bytes,
+            created: counts.created,
+            updated: counts.updated,
+            deleted: counts.deleted,
+            skipped: counts.skipped,
+        }))
+    }
+
+    #[tool(
+        name = "sync_put",
+        description = "Mirror a local directory onto a host. Files on the remote that are absent from the local source are deleted; files that match by sha256 are skipped. The remote destination follows the same cp/rsync rule as put_file. The local source must be a directory. Returns per-op counts; call trace for the full per-file list. The inventory's configured exclude patterns are always skipped; pass exclude to add more globs for this call."
+    )]
+    async fn sync_put(
+        &self,
+        params: Parameters<PutFileParams>,
+    ) -> Result<Json<SyncResult>, String> {
+        let PutFileParams {
+            host,
+            local_path,
+            remote_path,
+            exclude,
+        } = params.0;
+        let config = HostsConfig::load(&self.config_path).map_err(|e| format!("{e:#}"))?;
+        let timeout = match config.host(&host) {
+            Some(entry) => Duration::from_secs(config.exec_timeout_secs(entry)),
+            None => return Err(format!("unknown host {host:?}")),
+        };
+        let remote = pathnorm::normalize_remote(&remote_path).map_err(|e| format!("{e:#}"))?;
+        let local = pathnorm::normalize_local(&local_path).map_err(|e| format!("{e:#}"))?;
+
+        let mut excludes = config.defaults.exclude.clone();
+        excludes.extend(exclude);
+
+        let result = self
+            .pool
+            .sync_put(&config, &host, &local, &remote, &excludes, timeout)
+            .await;
+        let local_display = local.to_string_lossy();
+        match &result {
+            Ok(sr) => self.audit.record_transfer(
+                "sync_put",
+                &host,
+                &remote,
+                &local_display,
+                Some(sr.bytes),
+                None,
+            ),
+            Err(error) => {
+                let message = format!("{error:#}");
+                self.audit.record_transfer(
+                    "sync_put",
+                    &host,
+                    &remote,
+                    &local_display,
+                    None,
+                    Some(&message),
+                );
+            }
+        }
+        let sr = result.map_err(|e| format!("{e:#}"))?;
+        let counts = sr.change_set.counts();
+        self.record_transfer_trace("sync_put", &host, &remote, &local_display, &sr)
+            .await;
+        Ok(Json(SyncResult {
+            bytes: sr.bytes,
+            created: counts.created,
+            updated: counts.updated,
+            deleted: counts.deleted,
+            skipped: counts.skipped,
+        }))
+    }
+
+    /// Build the line-oriented trace body for a transfer (`<op> <rel_path>`
+    /// per line; the skipped paths are stashed separately so the model can
+    /// opt in to them through `include_skipped`).
+    async fn record_transfer_trace(
+        &self,
+        tool: &str,
+        host: &str,
+        remote: &str,
+        local: &str,
+        sr: &crate::ssh::SyncResult,
+    ) {
+        let mut lines = Vec::new();
+        let mut skipped = Vec::new();
+        for entry in &sr.change_set.entries {
+            let line = format!("{} {}", entry.op.verb(), entry.rel_path.display());
+            if entry.op == crate::changeset::ChangeOp::Skip {
+                skipped.push(line);
+            } else {
+                lines.push(line);
+            }
+        }
+        let counts = sr.change_set.counts();
+        let summary = format!(
+            "bytes={} created={} updated={} deleted={} skipped={}",
+            sr.bytes, counts.created, counts.updated, counts.deleted, counts.skipped
+        );
+        self.trace
+            .record(TraceEntry {
+                tool: tool.into(),
+                params: format!("host={host:?} remote={remote:?} local={local:?}"),
+                summary,
+                lines,
+                skipped,
+                truncated: false,
+            })
+            .await;
     }
 
     #[tool(

@@ -6,5 +6,5 @@ mod handler;
 mod pool;
 mod transfer;
 
-pub use pool::{ConnectionPool, ExecOutput};
+pub use pool::{ConnectionPool, ExecOutput, SyncResult};
 pub use transfer::TransferStats;

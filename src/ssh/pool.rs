@@ -6,7 +6,7 @@
 //! transparent.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,11 +17,20 @@ use tokio::sync::Mutex;
 use super::connect::{CONNECT_TIMEOUT, SshConnector, resolve_chain};
 use super::handler::StrictHostKey;
 use super::transfer::{self, TransferStats};
+use crate::changeset::{self, ChangeOp};
 use crate::config::HostsConfig;
 
 /// How long to wait for a session channel to open before treating the pooled
 /// connection as dead — a healthy connection opens one in a single round trip.
 const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The result of a `sync_*` call: bytes that crossed the wire plus the
+/// change set itself, so the caller can summarize counts and record each
+/// per-file decision in the trace buffer.
+pub struct SyncResult {
+    pub bytes: u64,
+    pub change_set: crate::changeset::ChangeSet,
+}
 
 /// The result of running one remote command.
 #[derive(Debug, Clone)]
@@ -82,6 +91,124 @@ impl ConnectionPool {
     ) -> Result<TransferStats> {
         let channel = self.open_session(config, host_alias).await?;
         transfer::download(channel, remote_path, local_path, exclude, timeout).await
+    }
+
+    /// Synchronise a local directory into a remote location, mirroring it:
+    /// files present on the remote but not on the local source are deleted.
+    /// Returns the change set so the caller can record per-entry detail and
+    /// the byte count of the archive payload.
+    pub async fn sync_put(
+        &self,
+        config: &HostsConfig,
+        host_alias: &str,
+        local_path: &Path,
+        remote_path: &str,
+        exclude: &[String],
+        timeout: Duration,
+    ) -> Result<SyncResult> {
+        if !local_path.is_dir() {
+            bail!(
+                "sync_put requires the local source to be a directory; {} is not",
+                local_path.display()
+            );
+        }
+        // sync_* treats `remote_path` as a stable destination root, not as a
+        // cp-merge target — that is what mirror semantics want (the same
+        // mapping every run). The remote root is created on demand by the
+        // upload step's `mkdir -p`.
+        let empty = PathBuf::new();
+        let (name_only, _complex) = changeset::partition_excludes(exclude);
+        let local_excludes = changeset::compile_excludes(exclude)?;
+        let source_map = changeset::walk_local(local_path, &empty, &local_excludes)?;
+
+        let walk_channel = self.open_session(config, host_alias).await?;
+        let walk_cmd = changeset::remote_walk_command_safe(remote_path, &name_only);
+        let walk_out = transfer::exec_capture(walk_channel, &walk_cmd, timeout).await?;
+        let dest_map = changeset::parse_walk_output(&walk_out, &empty)?;
+
+        let change_set = changeset::compute(source_map, dest_map, true);
+        let outgoing: Vec<PathBuf> = change_set.outgoing().map(|e| e.rel_path.clone()).collect();
+        let deletes: Vec<PathBuf> = change_set
+            .entries
+            .iter()
+            .filter(|e| e.op == ChangeOp::Delete)
+            .map(|e| e.rel_path.clone())
+            .collect();
+
+        let mut bytes = 0u64;
+        if !outgoing.is_empty() {
+            let channel = self.open_session(config, host_alias).await?;
+            bytes = transfer::upload_entries(
+                channel,
+                local_path,
+                &empty,
+                &outgoing,
+                remote_path,
+                timeout,
+            )
+            .await?;
+        }
+        if !deletes.is_empty() {
+            let channel = self.open_session(config, host_alias).await?;
+            transfer::delete_remote(channel, remote_path, &deletes, timeout).await?;
+        }
+        Ok(SyncResult { bytes, change_set })
+    }
+
+    /// Synchronise a remote directory into a local location, mirroring it.
+    pub async fn sync_get(
+        &self,
+        config: &HostsConfig,
+        host_alias: &str,
+        remote_path: &str,
+        local_path: &Path,
+        exclude: &[String],
+        timeout: Duration,
+    ) -> Result<SyncResult> {
+        let probe = self.open_session(config, host_alias).await?;
+        let remote_is_dir = transfer::remote_is_dir(probe, remote_path).await?;
+        if !remote_is_dir {
+            bail!("sync_get requires the remote source to be a directory; {remote_path:?} is not");
+        }
+        let empty = PathBuf::new();
+        let (name_only, _complex) = changeset::partition_excludes(exclude);
+        let walk_channel = self.open_session(config, host_alias).await?;
+        let walk_cmd = changeset::remote_walk_command_safe(remote_path, &name_only);
+        let walk_out = transfer::exec_capture(walk_channel, &walk_cmd, timeout).await?;
+        let source_map = changeset::parse_walk_output(&walk_out, &empty)?;
+
+        let local_excludes = changeset::compile_excludes(exclude)?;
+        let dest_map = changeset::walk_local(local_path, &empty, &local_excludes)?;
+
+        let change_set = changeset::compute(source_map, dest_map, true);
+        let outgoing: Vec<PathBuf> = change_set.outgoing().map(|e| e.rel_path.clone()).collect();
+        let deletes: Vec<PathBuf> = change_set
+            .entries
+            .iter()
+            .filter(|e| e.op == ChangeOp::Delete)
+            .map(|e| e.rel_path.clone())
+            .collect();
+
+        let mut bytes = 0u64;
+        if !outgoing.is_empty() {
+            std::fs::create_dir_all(local_path)
+                .with_context(|| format!("creating {}", local_path.display()))?;
+            let channel = self.open_session(config, host_alias).await?;
+            bytes =
+                transfer::download_entries(channel, remote_path, &outgoing, local_path, timeout)
+                    .await?;
+        }
+        for rel in &deletes {
+            let target = local_path.join(rel);
+            if let Ok(meta) = target.symlink_metadata() {
+                if meta.is_dir() {
+                    let _ = std::fs::remove_dir_all(&target);
+                } else {
+                    let _ = std::fs::remove_file(&target);
+                }
+            }
+        }
+        Ok(SyncResult { bytes, change_set })
     }
 
     /// Upload a local file or directory to `remote_path`.

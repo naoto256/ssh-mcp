@@ -164,6 +164,237 @@ fn resolve_upload_target(
     }
 }
 
+/// Pack a chosen subset of files under `source_root` into a tar archive and
+/// stream it into `target_dir` on the remote. The archive entry names equal
+/// the supplied relative paths (e.g. `proj/src/foo.rs`), so on extraction
+/// they land at `<target_dir>/<rel>`. Returns the archive byte count.
+pub async fn upload_entries(
+    mut channel: Channel<client::Msg>,
+    source_root: &Path,
+    source_root_name: &Path,
+    rel_paths: &[PathBuf],
+    target_dir: &str,
+    timeout: Duration,
+) -> Result<u64> {
+    let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
+    let archive = tar_file.path().to_path_buf();
+    let root = source_root.to_path_buf();
+    let base = source_root_name.to_path_buf();
+    let paths = rel_paths.to_vec();
+    tokio::task::spawn_blocking(move || pack_entries(&root, &base, &paths, &archive))
+        .await
+        .context("the archive creation task failed")??;
+    let bytes = tar_file
+        .as_file()
+        .metadata()
+        .context("sizing the archive")?
+        .len();
+
+    let command = format!(
+        "mkdir -p -- {dir} && tar -xz -f - -C {dir}",
+        dir = shell_quote(target_dir)
+    );
+    let input =
+        tokio::fs::File::from_std(tar_file.reopen().context("opening the temporary archive")?);
+    let result = tokio::time::timeout(timeout, run_upload(&mut channel, &command, input))
+        .await
+        .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
+    check_remote(&result)?;
+    Ok(bytes)
+}
+
+/// Synchronous counterpart of `upload_entries`'s pack step.
+fn pack_entries(
+    source_root: &Path,
+    source_root_name: &Path,
+    rel_paths: &[PathBuf],
+    archive: &Path,
+) -> Result<()> {
+    let file = std::fs::File::create(archive)
+        .with_context(|| format!("creating {}", archive.display()))?;
+    let mut builder = Builder::new(GzEncoder::new(file, Compression::default()));
+    builder.follow_symlinks(false);
+    let meta = std::fs::symlink_metadata(source_root)
+        .with_context(|| format!("reading {}", source_root.display()))?;
+    for rel in rel_paths {
+        // For a single-file source the relative path is just `<basename>`,
+        // so the local file path is `source_root` itself; for a directory
+        // source it is `source_root + rel_inside_root`.
+        let local = if meta.is_file() {
+            source_root.to_path_buf()
+        } else {
+            let inside = rel.strip_prefix(source_root_name).unwrap_or(rel);
+            source_root.join(inside)
+        };
+        builder
+            .append_path_with_name(&local, rel)
+            .with_context(|| format!("archiving {}", local.display()))?;
+    }
+    builder
+        .into_inner()
+        .context("finalising the archive")?
+        .finish()
+        .context("finalising the gzip stream")?;
+    Ok(())
+}
+
+/// Ask the remote to tar a chosen subset of files under `source_root`,
+/// stream it back, and extract the archive into `dest_root` locally
+/// (creating `dest_root` if it does not yet exist). Returns the compressed
+/// archive byte count.
+pub async fn download_entries(
+    mut channel: Channel<client::Msg>,
+    source_root: &str,
+    rel_paths_inside_source: &[PathBuf],
+    dest_root: &Path,
+    timeout: Duration,
+) -> Result<u64> {
+    std::fs::create_dir_all(dest_root)
+        .with_context(|| format!("creating {}", dest_root.display()))?;
+    let mut command = format!("tar -cz -f - -C {}", shell_quote(source_root));
+    command.push_str(" --");
+    for rel in rel_paths_inside_source {
+        command.push(' ');
+        command.push_str(&shell_quote(&rel.to_string_lossy()));
+    }
+
+    let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
+    let mut sink =
+        tokio::fs::File::from_std(tar_file.reopen().context("opening the temporary archive")?);
+
+    let (result, bytes) =
+        tokio::time::timeout(timeout, run_download(&mut channel, &command, &mut sink))
+            .await
+            .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
+    check_remote(&result)?;
+
+    let archive = tar_file.path().to_path_buf();
+    let dest = dest_root.to_path_buf();
+    tokio::task::spawn_blocking(move || unpack_into(&archive, &dest))
+        .await
+        .context("the archive extraction task failed")??;
+    Ok(bytes)
+}
+
+/// Extract an archive's contents straight into `dest_dir`, merging into
+/// whatever already lives there. Files inside the archive are overwritten if
+/// they collide with existing ones; files outside the archive are left
+/// alone.
+fn unpack_into(archive: &Path, dest_dir: &Path) -> Result<()> {
+    let file = std::fs::File::open(archive).context("opening the downloaded archive")?;
+    let mut archive = Archive::new(GzDecoder::new(file));
+    // The default behaviour overwrites existing files; we want that.
+    archive
+        .unpack(dest_dir)
+        .context("extracting the downloaded archive")?;
+    Ok(())
+}
+
+/// Capture stdout from a one-shot remote command, returning it as a single
+/// string. Errors carry the remote stderr.
+pub async fn exec_capture(
+    mut channel: Channel<client::Msg>,
+    command: &str,
+    timeout: Duration,
+) -> Result<String> {
+    let mut stdout = Vec::new();
+    let mut sink = std::io::Cursor::new(&mut stdout);
+    let (result, _bytes) =
+        tokio::time::timeout(timeout, run_capture(&mut channel, command, &mut sink))
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "the remote command timed out after {} seconds",
+                    timeout.as_secs()
+                )
+            })??;
+    check_remote(&result)?;
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
+}
+
+/// Synchronous-sink variant of `run_download` for in-memory capture.
+async fn run_capture(
+    channel: &mut Channel<client::Msg>,
+    command: &str,
+    sink: &mut std::io::Cursor<&mut Vec<u8>>,
+) -> Result<(RemoteResult, u64)> {
+    channel
+        .exec(true, command)
+        .await
+        .context("the remote command request failed")?;
+    let mut stderr = Vec::new();
+    let mut exit_code = -1;
+    let mut bytes = 0u64;
+    while let Some(message) = channel.wait().await {
+        match message {
+            ChannelMsg::Data { data } => {
+                std::io::Write::write_all(sink, &data).context("capturing remote stdout")?;
+                bytes += data.len() as u64;
+            }
+            ChannelMsg::ExtendedData { data, ext: 1 } => stderr.extend_from_slice(&data),
+            ChannelMsg::ExitStatus { exit_status } => exit_code = exit_status as i32,
+            _ => {}
+        }
+    }
+    Ok((
+        RemoteResult {
+            exit_code,
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        },
+        bytes,
+    ))
+}
+
+/// Remove a list of relative paths under `root` on the remote with
+/// `rm -rf`. Used by `sync_*` to apply the change set's `Delete` entries.
+pub async fn delete_remote(
+    mut channel: Channel<client::Msg>,
+    root: &str,
+    rel_paths: &[PathBuf],
+    timeout: Duration,
+) -> Result<()> {
+    if rel_paths.is_empty() {
+        return Ok(());
+    }
+    let mut command = format!("cd {} && rm -rf --", shell_quote(root));
+    for rel in rel_paths {
+        command.push(' ');
+        command.push_str(&shell_quote(&rel.to_string_lossy()));
+    }
+    let result = tokio::time::timeout(timeout, run_simple(&mut channel, &command))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "the remote rm timed out after {} seconds",
+                timeout.as_secs()
+            )
+        })??;
+    check_remote(&result)?;
+    Ok(())
+}
+
+/// Run a command that produces no output we care about, returning its exit
+/// status and stderr.
+async fn run_simple(channel: &mut Channel<client::Msg>, command: &str) -> Result<RemoteResult> {
+    channel
+        .exec(true, command)
+        .await
+        .context("the remote command request failed")?;
+    let mut stderr = Vec::new();
+    let mut exit_code = -1;
+    while let Some(message) = channel.wait().await {
+        match message {
+            ChannelMsg::ExtendedData { data, ext: 1 } => stderr.extend_from_slice(&data),
+            ChannelMsg::ExitStatus { exit_status } => exit_code = exit_status as i32,
+            _ => {}
+        }
+    }
+    Ok(RemoteResult {
+        exit_code,
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+    })
+}
+
 /// Detect whether a remote path is an existing directory by running a short
 /// `test -d` over `channel`. A non-zero exit is taken to mean "not a directory"
 /// — this covers both "does not exist" and "exists but is a file or symlink",
