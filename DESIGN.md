@@ -201,6 +201,14 @@ Every line of tool output is context the model has to spend reading.
 The full per-file list lives in the per-session trace buffer (§5), as
 `<verb> <path>` lines that grep cleanly.
 
+`bytes` is what crossed the wire — gzip-compressed tar payload
+including framing and per-file metadata — not the sum of file content
+sizes. A 4 KiB file uploads as ~4.2 KiB on the wire because of that
+framing. For `sync_*` the count covers only the files that actually
+moved (`created` + `updated`); a no-op run where every file matched
+by sha-256 returns `bytes = 0`. The number is a transfer-cost
+indicator, not a file-size measurement.
+
 ## 5. The trace tool
 
 ### 5.1 The op discipline
@@ -221,9 +229,9 @@ in the trace buffer (next).
 ### 5.2 The ring buffer
 
 Each MCP session has its own ring buffer holding the last five tool
-calls in full. A new tool — `trace(index, op)` — fetches one of those
-entries by index (0 = most recent, up to 4) and applies an op to the
-body before returning it. `trace` itself is not recorded.
+calls in full. A new tool — `trace(index, op, stream?)` — fetches one
+of those entries by index (0 = most recent, up to 4) and applies an op
+to the body before returning it. `trace` itself is not recorded.
 
 The buffer is per-session because sessions are independent agent
 conversations; one session must not be able to see another's traces.
@@ -237,7 +245,40 @@ demand. The model is told to scope through `op` and re-scope through
 `trace`, never by piping in the command itself, because doing so
 discards the very bytes `trace` would have been useful for.
 
-### 5.3 Transfer entries
+### 5.3 Channel tagging, interleaving, and grep on bare lines
+
+A naive implementation stores trace lines as `"stdout: <text>"` /
+`"stderr: <text>"` strings — one flat list with the channel folded
+into the line text. It is also wrong in two subtle ways.
+
+First, `grep` against `"stdout: <text>"` is not `grep` against
+`<text>`. A pattern like `^[1-9]$` that matched on the original
+`exec` result silently matches nothing on the trace — and the failure
+mode is an empty result with no error, the worst possible UX for a
+re-inspection tool.
+
+Second, accumulating "all stdout, then all stderr" loses the temporal
+interleaving. A build log where stderr warnings land between stdout
+progress lines reads back as two disconnected blocks.
+
+ssh-mcp's trace addresses both. Lines are stored with an explicit
+channel tag — `Stdout`, `Stderr`, or `Transfer` — and the exec
+collector preserves the raw arrival order of stdout and stderr
+chunks. The trace handler splits those chunks into ordered,
+channel-tagged lines (whichever channel produced a `\n` first wins
+the next slot), so the natural reading order is preserved across
+both streams. `grep` then matches against the bare text — never
+against any prefix — so a pattern that worked on the original
+`exec` result keeps working through `trace` unchanged.
+
+The `stream` parameter (default `both`) chooses what `trace` surfaces
+for an exec entry. `stdout` or `stderr` return only that channel,
+unprefixed (same shape as the corresponding field on the original
+`exec` result). `both` returns both channels in arrival order with
+`stdout:` / `stderr:` prefixes so the caller can tell them apart.
+Transfer entries ignore the selector — they have no channel concept.
+
+### 5.4 Transfer entries
 
 A transfer's trace body is line-oriented:
 
@@ -248,10 +289,12 @@ delete src/old.rs
 skip   src/main.rs
 ```
 
-The `skip` lines (hash-matched, no-op entries) are held in a separate
-companion list because they typically dwarf the actionable entries.
-`trace(... include_skipped=true)` mixes them into the body before the
-op is applied.
+Every line carries the `Transfer` channel tag, so the `stream`
+selector passes them through unchanged. The `skip` lines
+(hash-matched, no-op entries) are held in a separate companion list
+because they typically dwarf the actionable entries; `trace(...
+include_skipped=true)` mixes them into the body before the op is
+applied.
 
 ## 6. Connection model
 

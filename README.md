@@ -32,10 +32,10 @@ must be an alias from `list_hosts`.
 |---|---|
 | `list_hosts` | Returns each host's alias, purpose, tags, and policy kinds — **never** an address, user, or credential. Read-only, ungated. |
 | `exec` | Runs a shell command on a host and returns the exit code with scoped stdout/stderr. Requires an `op` (`tail` / `head` / `grep`) so output stays deliberately scoped; the full streams are kept in the per-session trace buffer for re-inspection. |
-| `get` | Downloads a file or directory. If the local destination is an existing directory the entry lands inside it under its remote base name (the `cp` rule); otherwise it replaces the destination. Returns a byte count. |
-| `put` | Symmetric: uploads a local file or directory. If the remote destination is an existing directory the entry lands inside; otherwise it replaces. Returns a byte count. |
-| `sync_get` / `sync_put` | Mirror a directory in either direction. Both paths are treated as roots: files in the destination that are absent from the source are deleted; files matching by sha-256 are skipped. Returns per-op counts. |
-| `trace` | Re-inspects the full detail of a recent tool call from a per-session ring buffer (depth 5, 10 MiB per entry). Requires an `op`. Transfer entries come back as `<verb> <path>` lines so they grep cleanly. |
+| `get` | Downloads a file or directory. If the local destination is an existing directory the entry lands inside it under its remote base name (the `cp` rule); otherwise it replaces the destination. Returns wire bytes (tar framing + metadata, not the sum of file content sizes). |
+| `put` | Symmetric: uploads a local file or directory. If the remote destination is an existing directory the entry lands inside; otherwise it replaces. Returns wire bytes (same meaning as `get`). |
+| `sync_get` / `sync_put` | Mirror a directory in either direction. Both paths are treated as roots: files in the destination that are absent from the source are deleted; files matching by sha-256 are skipped. Returns per-op counts and the wire bytes for the files that actually moved. |
+| `trace` | Re-inspects the full detail of a recent tool call from a per-session ring buffer (depth 5, 10 MiB per entry). Requires an `op`, and accepts a `stream` selector (`stdout` / `stderr` / `both`, default `both`) for exec entries. `grep` matches the bare line text, so a pattern that worked on the original `exec` result keeps working. Transfer entries come back as `<verb> <path>` lines. |
 
 The `op` requirement on `exec` and `trace` is deliberate. Models reading the
 schema know to scope output through the tool, not by piping through
