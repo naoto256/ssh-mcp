@@ -60,7 +60,11 @@ cp target/release/ssh-mcp ~/.local/bin/ssh-mcp
 
 ## Setup
 
-Three things need wiring (macOS with Claude Code).
+Three things need wiring (macOS or Linux with Claude Code). Windows is not
+currently supported — the daemon uses Unix Domain Sockets with peer-uid
+checks for its control channel; the equivalent on Windows would need a
+Named Pipe transport that has not been ported yet. Use WSL2 if you need
+to drive ssh-mcp from a Windows machine.
 
 ### 1. The host inventory
 
@@ -126,22 +130,37 @@ nearest-hop first.
 
 ### 2. The daemon
 
-The daemon must be resident. On macOS, run it as a LaunchAgent — edit the
-binary path in [`contrib/ssh-mcp-daemon.plist`](contrib/ssh-mcp-daemon.plist),
-then:
+The daemon must be resident, running as your own user. It listens on two
+Unix sockets under `~/.ssh/ssh-mcp/`: `mcp.sock` for MCP sessions and
+`control.sock` for policy queries. Both are owner-only and the daemon
+verifies each connection's peer uid; there is no TCP port and no network
+surface.
+
+**macOS** — run it as a LaunchAgent. Edit the binary path in
+[`contrib/ssh-mcp-daemon.plist`](contrib/ssh-mcp-daemon.plist), then:
 
 ```sh
 cp contrib/ssh-mcp-daemon.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/ssh-mcp-daemon.plist
 ```
 
-The daemon needs `SSH_AUTH_SOCK` to reach your SSH agent; if it cannot find
-the agent, set it in the plist's `EnvironmentVariables`.
+If the daemon cannot find the SSH agent, set `SSH_AUTH_SOCK` under
+`EnvironmentVariables` in the plist.
 
-The daemon listens on two Unix sockets under `~/.ssh/ssh-mcp/`:
-`mcp.sock` for MCP sessions and `control.sock` for policy queries.
-Both are owner-only and the daemon verifies each connection's peer uid;
-there is no TCP port and no network surface.
+**Linux** — run it as a user systemd service. Use
+[`contrib/ssh-mcp-daemon.service`](contrib/ssh-mcp-daemon.service):
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp contrib/ssh-mcp-daemon.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now ssh-mcp-daemon
+```
+
+If the daemon cannot find the SSH agent, uncomment one of the
+`Environment=SSH_AUTH_SOCK=...` lines in the unit (or set your own) and
+`systemctl --user restart ssh-mcp-daemon`. Logs are in
+`journalctl --user -u ssh-mcp-daemon`.
 
 ### 3. Claude Code
 
@@ -198,10 +217,14 @@ it. Grant it under System Settings → Privacy & Security → Local Network, the
 restart the daemon. A host on the public internet, or one reached only through
 a public-IP bastion, is not affected.
 
-**A tool call returns "op requires at least one of grep, head, or tail".**
-That is `exec` or `trace` rejecting an unscoped request. Pass an op
-(`{"tail": 50}`, `{"grep": "error"}`, `{"head": 20}`, or `grep` combined with
-one of `head`/`tail`). The intent is to make scoping deliberate.
+**A tool call returns "an op step needs exactly one of full=true, head,
+tail, or grep" or "trace requires at least one op step".** That is `exec`
+/ `trace` rejecting a malformed or empty `op`. `op` is an array of steps;
+each step picks one of `{full: true}` / `{head: N}` / `{tail: N}` /
+`{grep: STR}`. Combine across steps, not within: `[{head: 100}, {tail: 50}]`
+is a sliding window, `{head: 100, tail: 50}` is an error. `exec` accepts
+an omitted or empty op (returns metadata only, body stays in trace); `trace`
+needs at least one step.
 
 **Slow `sync_*` on a tree you have not touched.** Mirror still walks both
 sides and hashes every file. For a 10 k file tree the hash cost is a few
