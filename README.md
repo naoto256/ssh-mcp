@@ -61,10 +61,17 @@ cp target/release/ssh-mcp ~/.local/bin/ssh-mcp
 ## Setup
 
 Three things need wiring (macOS or Linux with Claude Code). Windows is not
-currently supported — the daemon uses Unix Domain Sockets with peer-uid
-checks for its control channel; the equivalent on Windows would need a
-Named Pipe transport that has not been ported yet. Use WSL2 if you need
-to drive ssh-mcp from a Windows machine.
+currently supported **as a host for the daemon** — the daemon uses Unix
+Domain Sockets with peer-uid checks for its control channel; the equivalent
+on Windows would need a Named Pipe transport that has not been ported yet.
+Use WSL2 if you need to drive ssh-mcp from a Windows machine.
+
+**Remote hosts** can be POSIX or Windows. The daemon probes each
+connection's shell family at connect time, picks the right command shapes
+on the fly (POSIX uses `find` / `sha256sum` / `tar`; Windows uses
+PowerShell + `tar.exe` and `Get-FileHash`), and decodes the remote console
+encoding (UTF-8 for POSIX, whatever `chcp` reports for Windows — e.g.
+CP932 on Japanese installs) before handing text back to the caller.
 
 ### 1. The host inventory
 
