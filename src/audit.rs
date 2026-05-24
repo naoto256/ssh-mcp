@@ -2,6 +2,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
@@ -135,9 +136,13 @@ impl AuditLog {
     fn append(&self, entry: &AuditEntry<'_>) -> Result<()> {
         let mut line = serde_json::to_string(entry)?;
         line.push('\n');
+        // Owner-only at the file level too: the parent `~/.ssh/ssh-mcp/`
+        // is already 0o700, but pinning the file mode keeps the record
+        // private even if someone later loosens the directory.
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(0o600)
             .open(&self.path)
             .with_context(|| format!("failed to open {}", self.path.display()))?;
         file.write_all(line.as_bytes())?;
