@@ -536,6 +536,51 @@ fn shell_quote(value: &str) -> String {
 #[allow(dead_code)]
 pub fn _timeout_marker(_d: Duration) {}
 
+/// OS-aware dispatch for the walk command builders and the paths-walk
+/// output parser. Mirrors the same pattern used in `ssh::transfer`: each
+/// caller (`pool::sync_*`, `control::sync_gate`) writes
+/// `os.walk_command_with_hashes(...)` instead of a `match` over
+/// `RemoteOs::Posix`/`Windows`, so adding a third remote family means
+/// adding new variants here, not chasing call sites across the codebase.
+impl crate::ssh::RemoteOs {
+    /// Build the walk command that produces `<sha256>  <relpath>` lines —
+    /// used by `sync_get` / `sync_put` to know which files to skip on a
+    /// hash match. `parse_walk_output` consumes the result; both POSIX
+    /// and Windows walk scripts emit the same line format, so the parser
+    /// is OS-neutral.
+    pub fn walk_command_with_hashes(self, root: &str, name_only_excludes: &[String]) -> String {
+        match self {
+            crate::ssh::RemoteOs::Posix => remote_walk_command_safe(root, name_only_excludes),
+            crate::ssh::RemoteOs::Windows => {
+                remote_walk_command_safe_windows(root, name_only_excludes)
+            }
+        }
+    }
+
+    /// Build the walk command that produces only relative paths — used by
+    /// the sync policy gate, which only needs to know which paths a
+    /// transfer would touch (no content). Pair with `parse_paths_walk`.
+    pub fn paths_walk_command(self, root: &str, name_only_excludes: &[String]) -> String {
+        match self {
+            crate::ssh::RemoteOs::Posix => remote_paths_walk_command_safe(root, name_only_excludes),
+            crate::ssh::RemoteOs::Windows => {
+                remote_paths_walk_command_safe_windows(root, name_only_excludes)
+            }
+        }
+    }
+
+    /// Parse the output of [`paths_walk_command`] into a set of relative
+    /// paths. The two scripts emit different shapes (POSIX = `find -print0`
+    /// NUL-separated, Windows = one path per line), so the parser is
+    /// OS-aware too.
+    pub fn parse_paths_walk(self, text: &str, base_name: &Path) -> HashSet<PathBuf> {
+        match self {
+            crate::ssh::RemoteOs::Posix => parse_paths_walk_output(text, base_name),
+            crate::ssh::RemoteOs::Windows => parse_paths_walk_output_lines(text, base_name),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

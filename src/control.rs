@@ -392,14 +392,7 @@ async fn decide_sync(
             return Decision::Deny;
         }
     };
-    let remote_walk_cmd = match remote_os {
-        crate::ssh::RemoteOs::Posix => {
-            changeset::remote_paths_walk_command_safe(remote, &name_only)
-        }
-        crate::ssh::RemoteOs::Windows => {
-            changeset::remote_paths_walk_command_safe_windows(remote, &name_only)
-        }
-    };
+    let remote_walk_cmd = remote_os.paths_walk_command(remote, &name_only);
     let remote_walk_out = match pool.exec(config, host, &remote_walk_cmd, timeout).await {
         Ok(out) if out.exit_code == 0 => out.stdout,
         Ok(out) => {
@@ -415,12 +408,7 @@ async fn decide_sync(
             return Decision::Deny;
         }
     };
-    let remote_paths = match remote_os {
-        crate::ssh::RemoteOs::Posix => changeset::parse_paths_walk_output(&remote_walk_out, &empty),
-        crate::ssh::RemoteOs::Windows => {
-            changeset::parse_paths_walk_output_lines(&remote_walk_out, &empty)
-        }
-    };
+    let remote_paths = remote_os.parse_paths_walk(&remote_walk_out, &empty);
 
     // The source side is the one we copy *from*; the dest side is where
     // deletes can come from. compute_paths is direction-aware via which

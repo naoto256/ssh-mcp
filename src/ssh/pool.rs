@@ -148,30 +148,16 @@ impl ConnectionPool {
     ) -> Result<TransferStats> {
         let pc = self.get_or_connect(config, host_alias).await?;
         let channel = self.open_session(config, host_alias).await?;
-        match pc.os {
-            RemoteOs::Posix => {
-                transfer::download(
-                    channel,
-                    remote_path,
-                    local_path,
-                    exclude,
-                    timeout,
-                    pc.encoding,
-                )
-                .await
-            }
-            RemoteOs::Windows => {
-                transfer::download_windows(
-                    channel,
-                    remote_path,
-                    local_path,
-                    exclude,
-                    timeout,
-                    pc.encoding,
-                )
-                .await
-            }
-        }
+        pc.os
+            .download(
+                channel,
+                remote_path,
+                local_path,
+                exclude,
+                timeout,
+                pc.encoding,
+            )
+            .await
     }
 
     /// Synchronise a local directory into a remote location, mirroring it:
@@ -204,12 +190,7 @@ impl ConnectionPool {
         let source_map = changeset::walk_local(local_path, &empty, &local_excludes)?;
 
         let walk_channel = self.open_session(config, host_alias).await?;
-        let walk_cmd = match pc.os {
-            RemoteOs::Posix => changeset::remote_walk_command_safe(remote_path, &name_only),
-            RemoteOs::Windows => {
-                changeset::remote_walk_command_safe_windows(remote_path, &name_only)
-            }
-        };
+        let walk_cmd = pc.os.walk_command_with_hashes(remote_path, &name_only);
         let walk_out =
             transfer::exec_capture(walk_channel, &walk_cmd, timeout, pc.encoding).await?;
         let dest_map = changeset::parse_walk_output(&walk_out, &empty)?;
@@ -226,51 +207,24 @@ impl ConnectionPool {
         let mut bytes = 0u64;
         if !outgoing.is_empty() {
             let channel = self.open_session(config, host_alias).await?;
-            bytes = match pc.os {
-                RemoteOs::Posix => {
-                    transfer::upload_entries(
-                        channel,
-                        local_path,
-                        &empty,
-                        &outgoing,
-                        remote_path,
-                        timeout,
-                        pc.encoding,
-                    )
-                    .await?
-                }
-                RemoteOs::Windows => {
-                    transfer::upload_entries_windows(
-                        channel,
-                        local_path,
-                        &empty,
-                        &outgoing,
-                        remote_path,
-                        timeout,
-                        pc.encoding,
-                    )
-                    .await?
-                }
-            };
+            bytes = pc
+                .os
+                .upload_entries(
+                    channel,
+                    local_path,
+                    &empty,
+                    &outgoing,
+                    remote_path,
+                    timeout,
+                    pc.encoding,
+                )
+                .await?;
         }
         if !deletes.is_empty() {
             let channel = self.open_session(config, host_alias).await?;
-            match pc.os {
-                RemoteOs::Posix => {
-                    transfer::delete_remote(channel, remote_path, &deletes, timeout, pc.encoding)
-                        .await?
-                }
-                RemoteOs::Windows => {
-                    transfer::delete_remote_windows(
-                        channel,
-                        remote_path,
-                        &deletes,
-                        timeout,
-                        pc.encoding,
-                    )
-                    .await?
-                }
-            }
+            pc.os
+                .delete_remote(channel, remote_path, &deletes, timeout, pc.encoding)
+                .await?;
         }
         Ok(SyncResult { bytes, change_set })
     }
@@ -287,22 +241,14 @@ impl ConnectionPool {
     ) -> Result<SyncResult> {
         let pc = self.get_or_connect(config, host_alias).await?;
         let probe = self.open_session(config, host_alias).await?;
-        let remote_is_dir = match pc.os {
-            RemoteOs::Posix => transfer::remote_is_dir(probe, remote_path).await?,
-            RemoteOs::Windows => transfer::remote_is_dir_windows(probe, remote_path).await?,
-        };
+        let remote_is_dir = pc.os.remote_is_dir(probe, remote_path).await?;
         if !remote_is_dir {
             bail!("sync_get requires the remote source to be a directory; {remote_path:?} is not");
         }
         let empty = PathBuf::new();
         let (name_only, _complex) = changeset::partition_excludes(exclude);
         let walk_channel = self.open_session(config, host_alias).await?;
-        let walk_cmd = match pc.os {
-            RemoteOs::Posix => changeset::remote_walk_command_safe(remote_path, &name_only),
-            RemoteOs::Windows => {
-                changeset::remote_walk_command_safe_windows(remote_path, &name_only)
-            }
-        };
+        let walk_cmd = pc.os.walk_command_with_hashes(remote_path, &name_only);
         let walk_out =
             transfer::exec_capture(walk_channel, &walk_cmd, timeout, pc.encoding).await?;
         let source_map = changeset::parse_walk_output(&walk_out, &empty)?;
@@ -324,30 +270,17 @@ impl ConnectionPool {
             std::fs::create_dir_all(local_path)
                 .with_context(|| format!("creating {}", local_path.display()))?;
             let channel = self.open_session(config, host_alias).await?;
-            bytes = match pc.os {
-                RemoteOs::Posix => {
-                    transfer::download_entries(
-                        channel,
-                        remote_path,
-                        &outgoing,
-                        local_path,
-                        timeout,
-                        pc.encoding,
-                    )
-                    .await?
-                }
-                RemoteOs::Windows => {
-                    transfer::download_entries_windows(
-                        channel,
-                        remote_path,
-                        &outgoing,
-                        local_path,
-                        timeout,
-                        pc.encoding,
-                    )
-                    .await?
-                }
-            };
+            bytes = pc
+                .os
+                .download_entries(
+                    channel,
+                    remote_path,
+                    &outgoing,
+                    local_path,
+                    timeout,
+                    pc.encoding,
+                )
+                .await?;
         }
         for rel in &deletes {
             let target = local_path.join(rel);
@@ -384,37 +317,19 @@ impl ConnectionPool {
         // single-use under russh, and the connection is pooled so there is no
         // round-trip for the second open.
         let probe = self.open_session(config, host_alias).await?;
-        let remote_is_dir = match pc.os {
-            RemoteOs::Posix => transfer::remote_is_dir(probe, remote_path).await?,
-            RemoteOs::Windows => transfer::remote_is_dir_windows(probe, remote_path).await?,
-        };
+        let remote_is_dir = pc.os.remote_is_dir(probe, remote_path).await?;
         let channel = self.open_session(config, host_alias).await?;
-        match pc.os {
-            RemoteOs::Posix => {
-                transfer::upload(
-                    channel,
-                    local_path,
-                    remote_path,
-                    remote_is_dir,
-                    exclude,
-                    timeout,
-                    pc.encoding,
-                )
-                .await
-            }
-            RemoteOs::Windows => {
-                transfer::upload_windows(
-                    channel,
-                    local_path,
-                    remote_path,
-                    remote_is_dir,
-                    exclude,
-                    timeout,
-                    pc.encoding,
-                )
-                .await
-            }
-        }
+        pc.os
+            .upload(
+                channel,
+                local_path,
+                remote_path,
+                remote_is_dir,
+                exclude,
+                timeout,
+                pc.encoding,
+            )
+            .await
     }
 
     /// Open a fresh channel on a host's pooled connection. A dead pooled
