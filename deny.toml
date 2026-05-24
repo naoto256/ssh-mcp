@@ -1,0 +1,66 @@
+# cargo-deny configuration. Goal: keep `cargo deny check` green so the
+# Rust supply-chain audit gate (code-audit-rust) passes. The shape here
+# is the smallest config that makes the current dependency tree pass:
+# an explicit allow-list of licenses we have looked at, plus a tight set
+# of advisory ignores with a written rationale for each.
+
+[graph]
+# Audit every target so the result is reproducible across platforms.
+all-features = true
+
+[advisories]
+version = 2
+ignore = [
+    # RSA "Marvin Attack" timing side-channel. No upstream fix is
+    # available yet (tracked in the rsa crate's own issue tracker).
+    # russh pulls rsa transitively through ssh-key for SSH RSA key
+    # handling. ssh-mcp is an SSH *client* that connects to hosts the
+    # operator has put in their own inventory — the threat model
+    # requires the attacker to be the SSH server able to observe
+    # timing, which is the host the user explicitly chose to trust.
+    # We accept the residual risk until rsa ships a constant-time
+    # implementation, at which point upgrading russh removes this.
+    "RUSTSEC-2023-0071",
+]
+
+[licenses]
+version = 2
+# Permissive OSS licenses that appear in the current dependency tree.
+# Reviewed individually; all are compatible with this project's MIT OR
+# Apache-2.0 dual licensing. Add a license here only after confirming
+# the new crate's terms are acceptable.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-1-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "0BSD",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# r-efi is dual-licensed (MIT OR Apache-2.0 OR LGPL-2.1-or-later). It is
+# only pulled in for UEFI targets we do not build for, but its
+# `Cargo.toml` lists all three options. Take the MIT/Apache route
+# explicitly so the LGPL alternative does not contaminate the audit.
+[[licenses.exceptions]]
+name = "r-efi"
+allow = ["MIT", "Apache-2.0"]
+
+[bans]
+# Several crypto-adjacent crates have both an old (0.x) and a
+# pre-release (rc) major in the tree at the same time because russh
+# 0.61 sits on the cusp of RustCrypto's rev-up. The duplicates are
+# unavoidable until russh's deps re-converge, and they don't change
+# the security surface — the same algorithm just gets compiled twice.
+multiple-versions = "allow"
+
+[sources]
+# Default settings (only crates.io and the standard git remotes). No
+# vendored or unknown sources to permit.
+unknown-registry = "deny"
+unknown-git = "deny"
