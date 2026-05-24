@@ -29,15 +29,26 @@ async fn relay() -> Result<()> {
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
 
-    // Relay until the harness closes stdin or the daemon closes the socket.
-    let harness_to_daemon = async {
-        copy(&mut stdin, &mut to_daemon).await?;
-        to_daemon.shutdown().await
-    };
-    let daemon_to_harness = async {
-        copy(&mut from_daemon, &mut stdout).await?;
-        stdout.flush().await
-    };
-    tokio::try_join!(harness_to_daemon, daemon_to_harness)?;
+    // Relay until *either* side ends. We deliberately use `select!` rather
+    // than `try_join!`: when the harness (parent) dies, its end of our
+    // stdin pipe is supposed to EOF — but if it crashed without flushing,
+    // or the launchd-managed stdio fd lands in a half-open state, the
+    // blocking `read(STDIN)` underneath `tokio::io::stdin()` can stay
+    // pinned in the kernel forever (observed as `UE` ps state, unkillable
+    // even by SIGKILL until the kernel unblocks the syscall). `try_join!`
+    // would then wait for that doomed leg even after the daemon socket is
+    // closed. With `select!`, the first side to finish drops the process,
+    // which is the correct lifetime for a stdio↔socket relay: once one
+    // direction is dead the other has nothing to deliver to anyway.
+    tokio::select! {
+        result = async {
+            copy(&mut stdin, &mut to_daemon).await?;
+            to_daemon.shutdown().await
+        } => result?,
+        result = async {
+            copy(&mut from_daemon, &mut stdout).await?;
+            stdout.flush().await
+        } => result?,
+    }
     Ok(())
 }
