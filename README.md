@@ -1,5 +1,9 @@
 # ssh-mcp
 
+[![CI](https://github.com/naoto256/ssh-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/naoto256/ssh-mcp/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Release](https://img.shields.io/github/v/release/naoto256/ssh-mcp?sort=semver)](https://github.com/naoto256/ssh-mcp/releases)
+
 A policy-gated SSH execution MCP server for Claude Code, written in Rust.
 
 It presents a curated host inventory to the model and runs remote commands and
@@ -240,11 +244,11 @@ weigh.
 
 ## Contributing
 
-- Commit messages are in English and explain the **why**.
-- One logical change per commit — no intermediate broken states.
-- Work on feature branches; `main` stays releasable.
-- `cargo fmt` and `cargo clippy -- -D warnings` must pass before a commit.
+This is a personal project. Bug reports and feature requests are welcome via
+GitHub Issues; pull requests are not accepted at this time. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at
+your option.
