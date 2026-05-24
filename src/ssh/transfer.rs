@@ -353,13 +353,7 @@ async fn run_capture(
             _ => {}
         }
     }
-    Ok((
-        RemoteResult {
-            exit_code,
-            stderr,
-        },
-        bytes,
-    ))
+    Ok((RemoteResult { exit_code, stderr }, bytes))
 }
 
 /// Remove a list of relative paths under `root` on the remote with
@@ -560,10 +554,7 @@ async fn run_simple(channel: &mut Channel<client::Msg>, command: &str) -> Result
             _ => {}
         }
     }
-    Ok(RemoteResult {
-        exit_code,
-        stderr,
-    })
+    Ok(RemoteResult { exit_code, stderr })
 }
 
 /// Detect whether a remote path is an existing directory by running a short
@@ -590,10 +581,7 @@ pub async fn remote_is_dir(mut channel: Channel<client::Msg>, path: &str) -> Res
 /// directory?" test — robust across modern Windows builds (including
 /// the ARM64 one that broke the older `if exist DIR\*` cmd.exe idiom).
 /// Exit code conveys the answer with no parse.
-pub async fn remote_is_dir_windows(
-    mut channel: Channel<client::Msg>,
-    path: &str,
-) -> Result<bool> {
+pub async fn remote_is_dir_windows(mut channel: Channel<client::Msg>, path: &str) -> Result<bool> {
     let script = format!(
         "if (Test-Path -LiteralPath '{p}' -PathType Container) {{ exit 0 }} else {{ exit 1 }}",
         p = ps_single_quote_local(path)
@@ -646,13 +634,7 @@ async fn run_download<W: AsyncWrite + Unpin>(
     sink.flush()
         .await
         .context("flushing the downloaded archive")?;
-    Ok((
-        RemoteResult {
-            exit_code,
-            stderr,
-        },
-        bytes,
-    ))
+    Ok((RemoteResult { exit_code, stderr }, bytes))
 }
 
 /// Run the remote extract command and stream `input` into its stdin.
@@ -683,10 +665,7 @@ async fn run_upload<R: AsyncRead + Unpin>(
             _ => {}
         }
     }
-    Ok(RemoteResult {
-        exit_code,
-        stderr,
-    })
+    Ok(RemoteResult { exit_code, stderr })
 }
 
 /// Turn a non-zero remote `tar` exit into an error carrying its stderr.
@@ -856,7 +835,6 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
-
 /// Split a Windows-style remote path into the directory it sits under and
 /// its base name. Both `/` and `\` are accepted as separators — the user
 /// or the remote can use either. The output keeps whichever slash was in
@@ -936,7 +914,8 @@ pub async fn upload_windows(
     }
     let excludes = compile_excludes(exclude)?;
 
-    let (dir, base) = resolve_upload_target_windows(local_path, remote_path, remote_is_existing_dir)?;
+    let (dir, base) =
+        resolve_upload_target_windows(local_path, remote_path, remote_is_existing_dir)?;
     let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
     let archive = tar_file.path().to_path_buf();
     let source = local_path.to_path_buf();
@@ -1138,22 +1117,14 @@ mod tests {
         let local = Path::new("/Users/naoto/code/proj");
         // Existing remote directory: the local entry lands inside under
         // its own basename.
-        let (dir, base) = resolve_upload_target_windows(
-            local,
-            "C:\\Users\\naoto\\workspaces",
-            true,
-        )
-        .unwrap();
+        let (dir, base) =
+            resolve_upload_target_windows(local, "C:\\Users\\naoto\\workspaces", true).unwrap();
         assert_eq!(dir, "C:\\Users\\naoto\\workspaces");
         assert_eq!(base, "proj");
         // Non-existing target: replace semantics. The local entry takes
         // the remote name.
-        let (dir, base) = resolve_upload_target_windows(
-            local,
-            "C:\\Users\\naoto\\dist",
-            false,
-        )
-        .unwrap();
+        let (dir, base) =
+            resolve_upload_target_windows(local, "C:\\Users\\naoto\\dist", false).unwrap();
         assert_eq!(dir, "C:\\Users\\naoto");
         assert_eq!(base, "dist");
     }

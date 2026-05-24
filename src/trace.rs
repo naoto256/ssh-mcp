@@ -133,9 +133,7 @@ impl OpStep {
         ];
         let set_count = knobs.iter().filter(|&&b| b).count();
         if set_count == 0 {
-            return Err(
-                "an op step needs exactly one of full=true, head, tail, or grep".into(),
-            );
+            return Err("an op step needs exactly one of full=true, head, tail, or grep".into());
         }
         if set_count > 1 {
             return Err(
@@ -153,8 +151,7 @@ impl OpStep {
 /// "missing required input" (trace).
 pub fn validate_pipeline(steps: &[OpStep]) -> Result<(), String> {
     for (i, step) in steps.iter().enumerate() {
-        step.validate()
-            .map_err(|e| format!("op step {i}: {e}"))?;
+        step.validate().map_err(|e| format!("op step {i}: {e}"))?;
     }
     Ok(())
 }
@@ -163,10 +160,7 @@ pub fn validate_pipeline(steps: &[OpStep]) -> Result<(), String> {
 /// pass-through; `head`/`tail`/`grep` narrow the running set. Returns the
 /// final lines together with the pre-pipeline total so callers can report
 /// how much was dropped.
-pub fn apply_pipeline(
-    lines: Vec<String>,
-    steps: &[OpStep],
-) -> Result<(Vec<String>, u32), String> {
+pub fn apply_pipeline(lines: Vec<String>, steps: &[OpStep]) -> Result<(Vec<String>, u32), String> {
     let total = lines.len() as u32;
     let mut cur = lines;
     for (i, step) in steps.iter().enumerate() {
@@ -208,10 +202,7 @@ pub fn apply_tagged_pipeline(
     Ok(cur)
 }
 
-fn apply_step_tagged(
-    lines: Vec<TraceLine>,
-    step: &OpStep,
-) -> Result<Vec<TraceLine>, String> {
+fn apply_step_tagged(lines: Vec<TraceLine>, step: &OpStep) -> Result<Vec<TraceLine>, String> {
     if matches!(step.full, Some(true)) {
         return Ok(lines);
     }
@@ -396,30 +387,38 @@ mod tests {
 
     #[test]
     fn step_validate_accepts_each_single_knob() {
-        assert!(OpStep {
-            full: Some(true),
-            ..OpStep::default()
-        }
-        .validate()
-        .is_ok());
-        assert!(OpStep {
-            head: Some(5),
-            ..OpStep::default()
-        }
-        .validate()
-        .is_ok());
-        assert!(OpStep {
-            tail: Some(5),
-            ..OpStep::default()
-        }
-        .validate()
-        .is_ok());
-        assert!(OpStep {
-            grep: Some("x".into()),
-            ..OpStep::default()
-        }
-        .validate()
-        .is_ok());
+        assert!(
+            OpStep {
+                full: Some(true),
+                ..OpStep::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            OpStep {
+                head: Some(5),
+                ..OpStep::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            OpStep {
+                tail: Some(5),
+                ..OpStep::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            OpStep {
+                grep: Some("x".into()),
+                ..OpStep::default()
+            }
+            .validate()
+            .is_ok()
+        );
     }
 
     #[test]

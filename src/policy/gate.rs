@@ -449,8 +449,14 @@ mod tests {
         "#,
         );
         let ev = evaluator();
-        assert_eq!(ev.evaluate(&cfg, "api-a", "rm -rf /").unwrap(), Decision::Deny);
-        assert_eq!(ev.evaluate(&cfg, "api-b", "rm -rf /").unwrap(), Decision::Deny);
+        assert_eq!(
+            ev.evaluate(&cfg, "api-a", "rm -rf /").unwrap(),
+            Decision::Deny
+        );
+        assert_eq!(
+            ev.evaluate(&cfg, "api-b", "rm -rf /").unwrap(),
+            Decision::Deny
+        );
         // A non-matching command falls through to the no-match fallback.
         assert_eq!(ev.evaluate(&cfg, "api-a", "ls").unwrap(), Decision::Ask);
     }
@@ -544,7 +550,11 @@ mod tests {
         "#,
         );
         let ev = evaluator();
-        assert_eq!(ev.evaluate(&cfg, "h", "dd if=/dev/zero of=/dev/sda").unwrap(), Decision::Deny);
+        assert_eq!(
+            ev.evaluate(&cfg, "h", "dd if=/dev/zero of=/dev/sda")
+                .unwrap(),
+            Decision::Deny
+        );
         assert_eq!(
             ev.evaluate(&cfg, "h", "systemctl restart nginx").unwrap(),
             Decision::Ask,

@@ -314,10 +314,7 @@ pub fn remote_walk_command_safe_windows(root: &str, name_only_excludes: &[String
 /// Windows counterpart of [`remote_paths_walk_command_safe`]: PowerShell
 /// recursive enumeration that emits one relpath per line — no hashing,
 /// since the hook gate only needs to know which paths would be touched.
-pub fn remote_paths_walk_command_safe_windows(
-    root: &str,
-    name_only_excludes: &[String],
-) -> String {
+pub fn remote_paths_walk_command_safe_windows(root: &str, name_only_excludes: &[String]) -> String {
     let script = format!(
         "$ErrorActionPreference = 'Stop'\n\
          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()\n\

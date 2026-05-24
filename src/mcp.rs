@@ -507,10 +507,7 @@ impl SshMcpServer {
         name = "get",
         description = "Download a file or directory from a host to the local machine. Files and directories are both supported (the tool name omits 'file' because the same call covers both). remote_path is on the host (absolute, or relative to the login directory — no leading ~); local_path is where it lands locally (absolute, or starting with ~/). If local_path is an existing directory the entry is placed inside it under its remote base name; otherwise local_path is replaced. The host's configured exclude patterns are always skipped; pass exclude to add more globs for this call. Result is a byte count only — the full per-file detail is not returned; call trace if you need it. `bytes` is the total transferred over the wire including tar framing and metadata, not the sum of file content sizes."
     )]
-    async fn get(
-        &self,
-        params: Parameters<GetParams>,
-    ) -> Result<Json<TransferResult>, String> {
+    async fn get(&self, params: Parameters<GetParams>) -> Result<Json<TransferResult>, String> {
         let GetParams {
             host,
             remote_path,
@@ -740,10 +737,7 @@ impl SshMcpServer {
         name = "put",
         description = "Upload a local file or directory to a host. Files and directories are both supported (the tool name omits 'file' because the same call covers both). local_path is the local source (absolute, or starting with ~/); remote_path is where it lands on the host (absolute, or relative to the login directory — no leading ~). If remote_path is an existing directory the entry is placed inside it under its local base name; otherwise remote_path is replaced. The inventory's configured exclude patterns (e.g. build output) are always skipped; pass exclude to add more globs for this call. Result is a byte count only — the full per-file detail is not returned; call trace if you need it. `bytes` is the total transferred over the wire including tar framing and metadata, not the sum of file content sizes."
     )]
-    async fn put(
-        &self,
-        params: Parameters<PutParams>,
-    ) -> Result<Json<TransferResult>, String> {
+    async fn put(&self, params: Parameters<PutParams>) -> Result<Json<TransferResult>, String> {
         let PutParams {
             host,
             local_path,
@@ -861,10 +855,7 @@ mod tests {
 
     #[test]
     fn detects_a_trailing_tail_pipe() {
-        assert_eq!(
-            detect_trailing_scope_pipe("ls -la | tail -5"),
-            Some("tail")
-        );
+        assert_eq!(detect_trailing_scope_pipe("ls -la | tail -5"), Some("tail"));
     }
 
     #[test]

@@ -678,4 +678,3 @@ fn windows_codepage_to_encoding(cp: u32) -> &'static encoding_rs::Encoding {
         _ => encoding_rs::UTF_8,
     }
 }
-

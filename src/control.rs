@@ -416,9 +416,7 @@ async fn decide_sync(
         }
     };
     let remote_paths = match remote_os {
-        crate::ssh::RemoteOs::Posix => {
-            changeset::parse_paths_walk_output(&remote_walk_out, &empty)
-        }
+        crate::ssh::RemoteOs::Posix => changeset::parse_paths_walk_output(&remote_walk_out, &empty),
         crate::ssh::RemoteOs::Windows => {
             changeset::parse_paths_walk_output_lines(&remote_walk_out, &empty)
         }
