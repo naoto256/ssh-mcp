@@ -63,11 +63,18 @@ pub enum RemoteOs {
     Windows,
 }
 
-/// A pooled SSH connection together with the probed OS of the remote.
+/// A pooled SSH connection together with the probed OS of the remote and
+/// the encoding the remote's console emits text bytes in. The encoding is
+/// always UTF-8 for POSIX (where shells are typically locale-correct and
+/// most distros are UTF-8 by default); for Windows it is whatever
+/// `chcp` reports at connect time (CP932 on Japanese installs, CP437 on
+/// US-English, etc). Stored as a `&'static Encoding` because every
+/// `encoding_rs::Encoding` value is a `'static` singleton.
 #[derive(Clone)]
 pub struct PooledConnection {
     pub handle: Arc<client::Handle<StrictHostKey>>,
     pub os: RemoteOs,
+    pub encoding: &'static encoding_rs::Encoding,
 }
 
 /// The result of running one remote command.
@@ -113,23 +120,15 @@ impl ConnectionPool {
         command: &str,
         timeout: Duration,
     ) -> Result<ExecOutput> {
+        // The command goes to the remote verbatim — we do *not* try to
+        // rewrite shell quoting or force a code page on the remote. The
+        // pooled connection already knows what encoding to interpret the
+        // returned bytes with (UTF-8 for POSIX, whatever `chcp` reported
+        // for Windows), so handling stays on the daemon side and the
+        // caller can write the most natural shell command for the host.
         let pc = self.get_or_connect(config, host_alias).await?;
         let mut channel = self.open_session(config, host_alias).await?;
-        // Windows: switch the cmd.exe code page to UTF-8 before running
-        // the caller's command so JP-locale stdout/stderr from regular
-        // programs does not arrive mojibake'd through the daemon's UTF-8
-        // decode. `chcp` only affects the current cmd.exe instance (one
-        // per exec) so this does not leak across calls. cmd.exe's *own*
-        // localised error messages ("'X' is not recognized as an
-        // internal or external command...") bypass the active code page
-        // and stay in the system default; that is a cmd.exe quirk, not
-        // something we can fix from here. To cover those the daemon
-        // would need to wrap commands in PowerShell or decode as CP932.
-        let effective = match pc.os {
-            RemoteOs::Posix => command.to_string(),
-            RemoteOs::Windows => format!("chcp 65001 >nul & {command}"),
-        };
-        run_command(&mut channel, &effective, timeout).await
+        run_command(&mut channel, command, timeout, pc.encoding).await
     }
 
     /// Download a remote file or directory to `local_path`.
@@ -151,10 +150,26 @@ impl ConnectionPool {
         let channel = self.open_session(config, host_alias).await?;
         match pc.os {
             RemoteOs::Posix => {
-                transfer::download(channel, remote_path, local_path, exclude, timeout).await
+                transfer::download(
+                    channel,
+                    remote_path,
+                    local_path,
+                    exclude,
+                    timeout,
+                    pc.encoding,
+                )
+                .await
             }
             RemoteOs::Windows => {
-                transfer::download_windows(channel, remote_path, local_path, exclude, timeout).await
+                transfer::download_windows(
+                    channel,
+                    remote_path,
+                    local_path,
+                    exclude,
+                    timeout,
+                    pc.encoding,
+                )
+                .await
             }
         }
     }
@@ -195,7 +210,8 @@ impl ConnectionPool {
                 changeset::remote_walk_command_safe_windows(remote_path, &name_only)
             }
         };
-        let walk_out = transfer::exec_capture(walk_channel, &walk_cmd, timeout).await?;
+        let walk_out =
+            transfer::exec_capture(walk_channel, &walk_cmd, timeout, pc.encoding).await?;
         let dest_map = changeset::parse_walk_output(&walk_out, &empty)?;
 
         let change_set = changeset::compute(source_map, dest_map, true);
@@ -219,6 +235,7 @@ impl ConnectionPool {
                         &outgoing,
                         remote_path,
                         timeout,
+                        pc.encoding,
                     )
                     .await?
                 }
@@ -230,6 +247,7 @@ impl ConnectionPool {
                         &outgoing,
                         remote_path,
                         timeout,
+                        pc.encoding,
                     )
                     .await?
                 }
@@ -239,11 +257,18 @@ impl ConnectionPool {
             let channel = self.open_session(config, host_alias).await?;
             match pc.os {
                 RemoteOs::Posix => {
-                    transfer::delete_remote(channel, remote_path, &deletes, timeout).await?
+                    transfer::delete_remote(channel, remote_path, &deletes, timeout, pc.encoding)
+                        .await?
                 }
                 RemoteOs::Windows => {
-                    transfer::delete_remote_windows(channel, remote_path, &deletes, timeout)
-                        .await?
+                    transfer::delete_remote_windows(
+                        channel,
+                        remote_path,
+                        &deletes,
+                        timeout,
+                        pc.encoding,
+                    )
+                    .await?
                 }
             }
         }
@@ -278,7 +303,8 @@ impl ConnectionPool {
                 changeset::remote_walk_command_safe_windows(remote_path, &name_only)
             }
         };
-        let walk_out = transfer::exec_capture(walk_channel, &walk_cmd, timeout).await?;
+        let walk_out =
+            transfer::exec_capture(walk_channel, &walk_cmd, timeout, pc.encoding).await?;
         let source_map = changeset::parse_walk_output(&walk_out, &empty)?;
 
         let local_excludes = changeset::compile_excludes(exclude)?;
@@ -300,8 +326,15 @@ impl ConnectionPool {
             let channel = self.open_session(config, host_alias).await?;
             bytes = match pc.os {
                 RemoteOs::Posix => {
-                    transfer::download_entries(channel, remote_path, &outgoing, local_path, timeout)
-                        .await?
+                    transfer::download_entries(
+                        channel,
+                        remote_path,
+                        &outgoing,
+                        local_path,
+                        timeout,
+                        pc.encoding,
+                    )
+                    .await?
                 }
                 RemoteOs::Windows => {
                     transfer::download_entries_windows(
@@ -310,6 +343,7 @@ impl ConnectionPool {
                         &outgoing,
                         local_path,
                         timeout,
+                        pc.encoding,
                     )
                     .await?
                 }
@@ -364,6 +398,7 @@ impl ConnectionPool {
                     remote_is_dir,
                     exclude,
                     timeout,
+                    pc.encoding,
                 )
                 .await
             }
@@ -375,6 +410,7 @@ impl ConnectionPool {
                     remote_is_dir,
                     exclude,
                     timeout,
+                    pc.encoding,
                 )
                 .await
             }
@@ -434,9 +470,14 @@ impl ConnectionPool {
         // time; the eventual cached value is the same and the cost is small
         // enough not to justify a per-host probe lock.
         let os = probe_remote_os(&handle).await;
+        let encoding = match os {
+            RemoteOs::Posix => encoding_rs::UTF_8,
+            RemoteOs::Windows => probe_windows_encoding(&handle).await,
+        };
         let pc = PooledConnection {
             handle,
             os,
+            encoding,
         };
         let mut connections = self.connections.lock().await;
         connections
@@ -474,8 +515,9 @@ async fn run_command(
     channel: &mut Channel<client::Msg>,
     command: &str,
     timeout: Duration,
+    encoding: &'static encoding_rs::Encoding,
 ) -> Result<ExecOutput> {
-    match tokio::time::timeout(timeout, collect_output(channel, command)).await {
+    match tokio::time::timeout(timeout, collect_output(channel, command, encoding)).await {
         Ok(result) => result,
         Err(_) => {
             let _ = channel.close().await;
@@ -484,7 +526,11 @@ async fn run_command(
     }
 }
 
-async fn collect_output(channel: &mut Channel<client::Msg>, command: &str) -> Result<ExecOutput> {
+async fn collect_output(
+    channel: &mut Channel<client::Msg>,
+    command: &str,
+    encoding: &'static encoding_rs::Encoding,
+) -> Result<ExecOutput> {
     channel
         .exec(true, command)
         .await
@@ -510,9 +556,16 @@ async fn collect_output(channel: &mut Channel<client::Msg>, command: &str) -> Re
         }
     }
 
+    // Decode the collected bytes using the connection's known encoding.
+    // `encoding_rs::Encoding::decode` lossily replaces invalid sequences
+    // with U+FFFD, matching the previous `from_utf8_lossy` behaviour for
+    // truly garbled bytes while correctly transcoding well-formed text
+    // (e.g. CP932 Japanese error messages from PowerShell on Windows).
+    let (stdout_text, _, _) = encoding.decode(&stdout);
+    let (stderr_text, _, _) = encoding.decode(&stderr);
     Ok(ExecOutput {
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stdout: stdout_text.into_owned(),
+        stderr: stderr_text.into_owned(),
         chunks,
         exit_code,
     })
@@ -540,7 +593,13 @@ async fn probe_remote_os(handle: &client::Handle<StrictHostKey>) -> RemoteOs {
             return RemoteOs::Posix;
         }
     }
-    if let Some(out) = probe_one(handle, "ver").await
+    // `ver` is a cmd.exe builtin and is *not* recognised by PowerShell (the
+    // default shell on most Windows OpenSSH setups), so probing for `ver`
+    // directly false-negatives on PS-default hosts. Going through `cmd /c`
+    // forces cmd.exe to evaluate `ver`, which works whether the login shell
+    // is cmd or PowerShell, while still failing cleanly on POSIX (where
+    // `cmd` is just an unknown command).
+    if let Some(out) = probe_one(handle, "cmd /c ver").await
         && out.stdout.contains("Microsoft Windows")
     {
         return RemoteOs::Windows;
@@ -558,9 +617,65 @@ async fn probe_remote_os(handle: &client::Handle<StrictHostKey>) -> RemoteOs {
 /// connection).
 async fn probe_one(handle: &client::Handle<StrictHostKey>, command: &str) -> Option<ExecOutput> {
     let mut channel = open_channel(handle).await.ok()?;
-    tokio::time::timeout(PROBE_TIMEOUT, collect_output(&mut channel, command))
-        .await
-        .ok()
-        .and_then(|r| r.ok())
+    // Probes look at ASCII-only fields (`Linux\n`, `Microsoft Windows`,
+    // `Active code page: 932`) so UTF-8 is a safe decoding choice even
+    // before we know the remote's real encoding.
+    tokio::time::timeout(
+        PROBE_TIMEOUT,
+        collect_output(&mut channel, command, encoding_rs::UTF_8),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+}
+
+/// Probe the Windows console code page once at connect time by running
+/// `cmd /c chcp`. The output line ends with the active code page in
+/// ASCII digits, regardless of UI locale (e.g. `Active code page: 437`
+/// in English, `現在のコード ページ: 932` in Japanese — the trailing
+/// integer is the same place either way). Maps to an `encoding_rs`
+/// encoding; falls back to UTF-8 if the probe fails or the code page is
+/// one we don't have a mapping for, which gives the same lossy decoding
+/// we used before this feature existed.
+async fn probe_windows_encoding(
+    handle: &client::Handle<StrictHostKey>,
+) -> &'static encoding_rs::Encoding {
+    let Some(out) = probe_one(handle, "cmd /c chcp").await else {
+        return encoding_rs::UTF_8;
+    };
+    let cp = out
+        .stdout
+        .split_whitespace()
+        .filter_map(|tok| tok.parse::<u32>().ok())
+        .next_back();
+    match cp {
+        Some(cp) => windows_codepage_to_encoding(cp),
+        None => encoding_rs::UTF_8,
+    }
+}
+
+/// Map a Windows console code page number to the closest `encoding_rs`
+/// encoding. Only the common ones are listed — anything unrecognised
+/// degrades to UTF-8 (the previous behaviour, which is lossy on non-
+/// UTF-8 bytes but the safest default for hosts we have no information
+/// about).
+fn windows_codepage_to_encoding(cp: u32) -> &'static encoding_rs::Encoding {
+    match cp {
+        65001 => encoding_rs::UTF_8,
+        932 => encoding_rs::SHIFT_JIS,
+        936 => encoding_rs::GBK,
+        949 => encoding_rs::EUC_KR,
+        950 => encoding_rs::BIG5,
+        1250 => encoding_rs::WINDOWS_1250,
+        1251 => encoding_rs::WINDOWS_1251,
+        1252 => encoding_rs::WINDOWS_1252,
+        1253 => encoding_rs::WINDOWS_1253,
+        1254 => encoding_rs::WINDOWS_1254,
+        1255 => encoding_rs::WINDOWS_1255,
+        1256 => encoding_rs::WINDOWS_1256,
+        1257 => encoding_rs::WINDOWS_1257,
+        1258 => encoding_rs::WINDOWS_1258,
+        _ => encoding_rs::UTF_8,
+    }
 }
 

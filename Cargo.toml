@@ -26,6 +26,11 @@ flate2 = "1"
 sha2 = "0.10"
 walkdir = "2"
 base64 = "0.22"
+# Local-side decoding of remote stdout/stderr when the remote console
+# code page is not UTF-8 (typically Japanese Windows = CP932). The remote
+# is told nothing about encoding — we just probe `chcp` once at connect
+# time and decode bytes on the daemon side.
+encoding_rs = "0.8"
 
 [profile.release]
 strip = true

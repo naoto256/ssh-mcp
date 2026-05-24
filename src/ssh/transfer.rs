@@ -28,10 +28,15 @@ pub struct TransferStats {
     pub bytes: u64,
 }
 
-/// The outcome of the remote `tar` process.
+/// The outcome of a remote helper process (`tar`, PowerShell walk,
+/// `rm` / `Remove-Item`, ...). `stderr` is kept as raw bytes so that
+/// the appropriate decoder (UTF-8 for POSIX, whatever code page the
+/// connection cached for Windows) can be applied at the point of
+/// display, rather than lossily decoded at capture and then re-mojibaked
+/// when shown to the user.
 struct RemoteResult {
     exit_code: i32,
-    stderr: String,
+    stderr: Vec<u8>,
 }
 
 /// Download a remote file or directory to `local_path`.
@@ -46,6 +51,7 @@ pub async fn download(
     local_path: &Path,
     exclude: &[String],
     timeout: Duration,
+    encoding: &'static encoding_rs::Encoding,
 ) -> Result<TransferStats> {
     let (dir, base) = split_remote(remote_path)?;
     let target = resolve_download_target(local_path, &base);
@@ -71,7 +77,7 @@ pub async fn download(
         tokio::time::timeout(timeout, run_download(&mut channel, &command, &mut sink))
             .await
             .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
-    check_remote(&result)?;
+    check_remote(&result, encoding)?;
 
     let archive = tar_file.path().to_path_buf();
     let dest = target;
@@ -107,6 +113,7 @@ pub async fn upload(
     remote_is_existing_dir: bool,
     exclude: &[String],
     timeout: Duration,
+    encoding: &'static encoding_rs::Encoding,
 ) -> Result<TransferStats> {
     if !local_path.exists() {
         bail!("the local path {} does not exist", local_path.display());
@@ -137,7 +144,7 @@ pub async fn upload(
     let result = tokio::time::timeout(timeout, run_upload(&mut channel, &command, input))
         .await
         .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
-    check_remote(&result)?;
+    check_remote(&result, encoding)?;
     Ok(TransferStats { bytes })
 }
 
@@ -175,6 +182,7 @@ pub async fn upload_entries(
     rel_paths: &[PathBuf],
     target_dir: &str,
     timeout: Duration,
+    encoding: &'static encoding_rs::Encoding,
 ) -> Result<u64> {
     let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
     let archive = tar_file.path().to_path_buf();
@@ -199,7 +207,7 @@ pub async fn upload_entries(
     let result = tokio::time::timeout(timeout, run_upload(&mut channel, &command, input))
         .await
         .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
-    check_remote(&result)?;
+    check_remote(&result, encoding)?;
     Ok(bytes)
 }
 
@@ -248,6 +256,7 @@ pub async fn download_entries(
     rel_paths_inside_source: &[PathBuf],
     dest_root: &Path,
     timeout: Duration,
+    encoding: &'static encoding_rs::Encoding,
 ) -> Result<u64> {
     std::fs::create_dir_all(dest_root)
         .with_context(|| format!("creating {}", dest_root.display()))?;
@@ -266,7 +275,7 @@ pub async fn download_entries(
         tokio::time::timeout(timeout, run_download(&mut channel, &command, &mut sink))
             .await
             .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
-    check_remote(&result)?;
+    check_remote(&result, encoding)?;
 
     let archive = tar_file.path().to_path_buf();
     let dest = dest_root.to_path_buf();
@@ -292,10 +301,18 @@ fn unpack_into(archive: &Path, dest_dir: &Path) -> Result<()> {
 
 /// Capture stdout from a one-shot remote command, returning it as a single
 /// string. Errors carry the remote stderr.
+///
+/// `encoding` is used only for *stderr* (when surfacing the failure via
+/// `check_remote`). Stdout is decoded as UTF-8 because the only caller
+/// is the sync gate's walk command, whose PowerShell / `find` script
+/// explicitly forces UTF-8 output regardless of the remote console code
+/// page — decoding those UTF-8 bytes with the connection's encoding
+/// (CP932 etc.) would re-mojibake them.
 pub async fn exec_capture(
     mut channel: Channel<client::Msg>,
     command: &str,
     timeout: Duration,
+    encoding: &'static encoding_rs::Encoding,
 ) -> Result<String> {
     let mut stdout = Vec::new();
     let mut sink = std::io::Cursor::new(&mut stdout);
@@ -308,7 +325,7 @@ pub async fn exec_capture(
                     timeout.as_secs()
                 )
             })??;
-    check_remote(&result)?;
+    check_remote(&result, encoding)?;
     Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
 
@@ -339,7 +356,7 @@ async fn run_capture(
     Ok((
         RemoteResult {
             exit_code,
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            stderr,
         },
         bytes,
     ))
@@ -352,6 +369,7 @@ pub async fn delete_remote(
     root: &str,
     rel_paths: &[PathBuf],
     timeout: Duration,
+    encoding: &'static encoding_rs::Encoding,
 ) -> Result<()> {
     if rel_paths.is_empty() {
         return Ok(());
@@ -369,7 +387,7 @@ pub async fn delete_remote(
                 timeout.as_secs()
             )
         })??;
-    check_remote(&result)?;
+    check_remote(&result, encoding)?;
     Ok(())
 }
 
@@ -383,6 +401,7 @@ pub async fn upload_entries_windows(
     rel_paths: &[PathBuf],
     target_dir: &str,
     timeout: Duration,
+    encoding: &'static encoding_rs::Encoding,
 ) -> Result<u64> {
     let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
     let archive = tar_file.path().to_path_buf();
@@ -398,38 +417,43 @@ pub async fn upload_entries_windows(
         .context("sizing the archive")?
         .len();
 
-    let command = format!(
-        "mkdir {dir} 2>nul & tar.exe -C {dir} -xzf -",
-        dir = cmd_quote(target_dir)
-    );
+    let command = ps_tar_extract_stdin_command(target_dir);
     let input =
         tokio::fs::File::from_std(tar_file.reopen().context("opening the temporary archive")?);
     let result = tokio::time::timeout(timeout, run_upload(&mut channel, &command, input))
         .await
         .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
-    check_remote(&result)?;
+    check_remote(&result, encoding)?;
     Ok(bytes)
 }
 
-/// Windows counterpart of [`download_entries`]: the remote runs
-/// `tar.exe -C SOURCE_ROOT -czf - -- rel1 rel2 ...` and streams the
-/// archive back; the local side extracts straight into `dest_root` as
-/// for POSIX.
+/// Windows counterpart of [`download_entries`]: PowerShell runs
+/// `tar.exe -C SOURCE_ROOT -czf - -- rel1 rel2 ...` and forwards
+/// `tar.exe`'s binary stdout back over the SSH channel.
 pub async fn download_entries_windows(
     mut channel: Channel<client::Msg>,
     source_root: &str,
     rel_paths_inside_source: &[PathBuf],
     dest_root: &Path,
     timeout: Duration,
+    encoding: &'static encoding_rs::Encoding,
 ) -> Result<u64> {
     std::fs::create_dir_all(dest_root)
         .with_context(|| format!("creating {}", dest_root.display()))?;
-    let mut command = format!("tar.exe -C {dir} -czf -", dir = cmd_quote(source_root));
-    command.push_str(" --");
+    let mut ps_args = vec![
+        "'-C'".to_string(),
+        format!("'{}'", ps_single_quote_local(source_root)),
+        "'-czf'".to_string(),
+        "'-'".to_string(),
+        "'--'".to_string(),
+    ];
     for rel in rel_paths_inside_source {
-        command.push(' ');
-        command.push_str(&cmd_quote(&rel.to_string_lossy()));
+        ps_args.push(format!(
+            "'{}'",
+            ps_single_quote_local(&rel.to_string_lossy())
+        ));
     }
+    let command = ps_tar_create_to_stdout_command(&ps_args);
 
     let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
     let mut sink =
@@ -439,7 +463,7 @@ pub async fn download_entries_windows(
         tokio::time::timeout(timeout, run_download(&mut channel, &command, &mut sink))
             .await
             .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
-    check_remote(&result)?;
+    check_remote(&result, encoding)?;
 
     let archive = tar_file.path().to_path_buf();
     let dest = dest_root.to_path_buf();
@@ -457,6 +481,7 @@ pub async fn delete_remote_windows(
     root: &str,
     rel_paths: &[PathBuf],
     timeout: Duration,
+    encoding: &'static encoding_rs::Encoding,
 ) -> Result<()> {
     if rel_paths.is_empty() {
         return Ok(());
@@ -495,7 +520,7 @@ pub async fn delete_remote_windows(
                 timeout.as_secs()
             )
         })??;
-    check_remote(&result)?;
+    check_remote(&result, encoding)?;
     Ok(())
 }
 
@@ -537,7 +562,7 @@ async fn run_simple(channel: &mut Channel<client::Msg>, command: &str) -> Result
     }
     Ok(RemoteResult {
         exit_code,
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stderr,
     })
 }
 
@@ -560,19 +585,22 @@ pub async fn remote_is_dir(mut channel: Channel<client::Msg>, path: &str) -> Res
     Ok(exit_code == 0)
 }
 
-/// Windows counterpart of [`remote_is_dir`]. The classic `\NUL` idiom
-/// turns out to be broken on Windows 11 ARM (every directory tests
-/// false), so the wildcard probe `PATH\*` is used instead: cmd.exe's
-/// `if exist` matches the wildcard against directory contents, which
-/// returns true for any directory (empty included) and false for files
-/// or missing paths. Exit code conveys the answer with no parse.
+/// Windows counterpart of [`remote_is_dir`]. PowerShell's
+/// `Test-Path -PathType Container` is the canonical "is this a
+/// directory?" test — robust across modern Windows builds (including
+/// the ARM64 one that broke the older `if exist DIR\*` cmd.exe idiom).
+/// Exit code conveys the answer with no parse.
 pub async fn remote_is_dir_windows(
     mut channel: Channel<client::Msg>,
     path: &str,
 ) -> Result<bool> {
+    let script = format!(
+        "if (Test-Path -LiteralPath '{p}' -PathType Container) {{ exit 0 }} else {{ exit 1 }}",
+        p = ps_single_quote_local(path)
+    );
     let command = format!(
-        "if exist {}\\* (exit /b 0) else (exit /b 1)",
-        cmd_quote(path)
+        "powershell -NoProfile -EncodedCommand {}",
+        powershell_encoded_command_local(&script)
     );
     channel
         .exec(true, command)
@@ -621,7 +649,7 @@ async fn run_download<W: AsyncWrite + Unpin>(
     Ok((
         RemoteResult {
             exit_code,
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            stderr,
         },
         bytes,
     ))
@@ -657,16 +685,21 @@ async fn run_upload<R: AsyncRead + Unpin>(
     }
     Ok(RemoteResult {
         exit_code,
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stderr,
     })
 }
 
 /// Turn a non-zero remote `tar` exit into an error carrying its stderr.
-fn check_remote(result: &RemoteResult) -> Result<()> {
+/// Decoding happens here, not at capture: the raw bytes from the remote
+/// could be in any console code page (CP932 on Japanese Windows, UTF-8
+/// on POSIX, ...), and we want the eventual error string to be
+/// well-formed UTF-8 for the daemon's callers.
+fn check_remote(result: &RemoteResult, encoding: &'static encoding_rs::Encoding) -> Result<()> {
     if result.exit_code == 0 {
         return Ok(());
     }
-    let detail = result.stderr.trim();
+    let (stderr_text, _, _) = encoding.decode(&result.stderr);
+    let detail = stderr_text.trim();
     if detail.is_empty() {
         bail!(
             "the remote tar process exited with status {}",
@@ -823,16 +856,6 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
-/// Quote a string as a single cmd.exe argument. cmd uses `"..."` for
-/// quoting and treats `"` inside as the only escape that matters; `\` is
-/// literal (unlike POSIX). We do not try to defend against weirdness like
-/// embedded `%VAR%` expansion or trailing backslashes inside quotes — those
-/// are not meaningful in any path we expect a model to pass us. The path's
-/// own forward / backward slashes are left alone; bsdtar and `cd /d` both
-/// accept either separator.
-fn cmd_quote(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
-}
 
 /// Split a Windows-style remote path into the directory it sits under and
 /// its base name. Both `/` and `\` are accepted as separators — the user
@@ -892,11 +915,13 @@ fn resolve_upload_target_windows(
 }
 
 /// Upload to a Windows remote. The local side builds the gzip-tar archive
-/// the same way as for POSIX; the remote side untars it through cmd.exe +
-/// `tar.exe` (the libarchive build that has shipped with Windows since
-/// 10 1803). Command chain: `mkdir` (with intermediate creation, error
-/// silenced for existing target) followed by `tar -C DIR -xzf -`, with
-/// `-C` placed *before* `-xzf -` so bsdtar treats it as an option.
+/// the same way as for POSIX. The remote side runs entirely inside one
+/// PowerShell script: it ensures the destination directory exists, then
+/// spawns `tar.exe` with its stdin connected to the SSH channel input
+/// stream — `System.Diagnostics.Process` plus `[Console]::OpenStandardInput`
+/// gives a raw binary pipe, with `[Console]::OutputEncoding = UTF-8` so
+/// any path or progress messages come back cleanly. The cmd.exe shell
+/// is not involved.
 pub async fn upload_windows(
     mut channel: Channel<client::Msg>,
     local_path: &Path,
@@ -904,6 +929,7 @@ pub async fn upload_windows(
     remote_is_existing_dir: bool,
     exclude: &[String],
     timeout: Duration,
+    encoding: &'static encoding_rs::Encoding,
 ) -> Result<TransferStats> {
     if !local_path.exists() {
         bail!("the local path {} does not exist", local_path.display());
@@ -924,18 +950,76 @@ pub async fn upload_windows(
         .context("sizing the archive")?
         .len();
 
-    let command = format!(
-        "mkdir {dir} 2>nul & tar.exe -C {dir} -xzf -",
-        dir = cmd_quote(&dir)
-    );
+    let command = ps_tar_extract_stdin_command(&dir);
     let input =
         tokio::fs::File::from_std(tar_file.reopen().context("opening the temporary archive")?);
 
     let result = tokio::time::timeout(timeout, run_upload(&mut channel, &command, input))
         .await
         .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
-    check_remote(&result)?;
+    check_remote(&result, encoding)?;
     Ok(TransferStats { bytes })
+}
+
+/// Build the PowerShell `powershell -NoProfile -EncodedCommand` invocation
+/// that runs `tar.exe` with the provided argument list and forwards its
+/// stdout (binary) to the SSH channel. Used by the download/get path.
+/// Each element of `ps_args` is already a PowerShell-literal expression
+/// (typically a single-quoted string), and they are joined with `,` into
+/// an `ArgumentList`-style invocation.
+fn ps_tar_create_to_stdout_command(ps_args: &[String]) -> String {
+    let args_literal = ps_args.join(",");
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'\n\
+         $args = @({args})\n\
+         # CreateProcess takes an Arguments *string*; build one whose tokens\n\
+         # are quoted so paths with spaces/backslashes round-trip cleanly.\n\
+         $argString = ($args | ForEach-Object {{ '\"' + ($_ -replace '\"', '\\\"') + '\"' }}) -join ' '\n\
+         $psi = New-Object System.Diagnostics.ProcessStartInfo\n\
+         $psi.FileName = 'tar.exe'\n\
+         $psi.Arguments = $argString\n\
+         $psi.UseShellExecute = $false\n\
+         $psi.RedirectStandardOutput = $true\n\
+         $p = [System.Diagnostics.Process]::Start($psi)\n\
+         $p.StandardOutput.BaseStream.CopyTo([Console]::OpenStandardOutput())\n\
+         $p.WaitForExit()\n\
+         exit $p.ExitCode",
+        args = args_literal
+    );
+    format!(
+        "powershell -NoProfile -EncodedCommand {}",
+        powershell_encoded_command_local(&script)
+    )
+}
+
+/// Build the PowerShell `powershell -NoProfile -EncodedCommand` invocation
+/// that creates `dir` if missing and runs `tar.exe -C <dir> -xzf -`
+/// against raw stdin. Used by both the single-entry `upload_windows` and
+/// the partial-tree `upload_entries_windows`.
+fn ps_tar_extract_stdin_command(dir: &str) -> String {
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'\n\
+         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()\n\
+         $dir = '{dir}'\n\
+         if (-not (Test-Path -LiteralPath $dir -PathType Container)) {{\n\
+           New-Item -ItemType Directory -Force -Path $dir | Out-Null\n\
+         }}\n\
+         $psi = New-Object System.Diagnostics.ProcessStartInfo\n\
+         $psi.FileName = 'tar.exe'\n\
+         $psi.Arguments = \"-C `\"$dir`\" -xzf -\"\n\
+         $psi.UseShellExecute = $false\n\
+         $psi.RedirectStandardInput = $true\n\
+         $p = [System.Diagnostics.Process]::Start($psi)\n\
+         [Console]::OpenStandardInput().CopyTo($p.StandardInput.BaseStream)\n\
+         $p.StandardInput.Close()\n\
+         $p.WaitForExit()\n\
+         exit $p.ExitCode",
+        dir = ps_single_quote_local(dir)
+    );
+    format!(
+        "powershell -NoProfile -EncodedCommand {}",
+        powershell_encoded_command_local(&script)
+    )
 }
 
 /// Download from a Windows remote. The remote runs `tar.exe -czf -` to
@@ -948,6 +1032,7 @@ pub async fn download_windows(
     local_path: &Path,
     exclude: &[String],
     timeout: Duration,
+    encoding: &'static encoding_rs::Encoding,
 ) -> Result<TransferStats> {
     let (dir, base) = split_remote_windows(remote_path)?;
     let target = resolve_download_target(local_path, &base);
@@ -958,13 +1043,23 @@ pub async fn download_windows(
 
     // tar.exe's `--exclude` accepts the same name-pattern shape as GNU tar
     // (libarchive parity), so the existing exclude list flows through.
-    // Symmetric to upload_windows: tar.exe with `-C` placed before the
-    // `-czf -` so bsdtar treats it as an option, not a positional file.
-    let mut command = format!("tar.exe -C {dir} -czf -", dir = cmd_quote(&dir));
+    // Symmetric to upload_windows: PowerShell runs tar.exe and pipes its
+    // stdout (binary tar.gz bytes) back to us. Arguments are built as a
+    // PowerShell array literal so each item is quoted independently —
+    // safer than building a flat string when paths contain spaces or
+    // backslashes.
+    let mut ps_args = vec![
+        "'-C'".to_string(),
+        format!("'{}'", ps_single_quote_local(&dir)),
+        "'-czf'".to_string(),
+        "'-'".to_string(),
+    ];
     for pattern in exclude {
-        command.push_str(&format!(" --exclude={}", cmd_quote(pattern)));
+        ps_args.push(format!("'--exclude={}'", ps_single_quote_local(pattern)));
     }
-    command.push_str(&format!(" -- {}", cmd_quote(&base)));
+    ps_args.push("'--'".to_string());
+    ps_args.push(format!("'{}'", ps_single_quote_local(&base)));
+    let command = ps_tar_create_to_stdout_command(&ps_args);
 
     let tar_file = NamedTempFile::new().context("creating a temporary archive file")?;
     let mut sink =
@@ -974,7 +1069,7 @@ pub async fn download_windows(
         tokio::time::timeout(timeout, run_download(&mut channel, &command, &mut sink))
             .await
             .map_err(|_| anyhow!("the transfer timed out after {} seconds", timeout.as_secs()))??;
-    check_remote(&result)?;
+    check_remote(&result, encoding)?;
 
     let archive = tar_file.path().to_path_buf();
     let dest = target;
@@ -994,15 +1089,6 @@ mod tests {
         assert_eq!(shell_quote("plain"), "'plain'");
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
-    }
-
-    #[test]
-    fn cmd_quote_wraps_and_escapes() {
-        // cmd uses `"..."` for quoting; `"` inside is escaped by doubling.
-        // Backslashes are literal — paths like `C:\foo bar` work as-is.
-        assert_eq!(cmd_quote("plain"), "\"plain\"");
-        assert_eq!(cmd_quote("C:\\foo bar"), "\"C:\\foo bar\"");
-        assert_eq!(cmd_quote("a\"b"), "\"a\"\"b\"");
     }
 
     #[test]

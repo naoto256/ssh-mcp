@@ -327,7 +327,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "exec",
-        description = "**DO NOT pipe through `tail` / `head` / `grep` in the shell command — use the `op` pipeline instead.** Shell-side pipes scope before the daemon sees the bytes, so `trace` only has the post-pipe slice; double-scoping triggers an advisory `note` on the result.\n\nRun a shell command on a host from list_hosts. Returns the exit code, line counts, and (optionally) the scoped output. `op` is an ordered pipeline of steps — omit it or pass `[]` to get the metadata only (the full output stays in the per-session trace buffer for inspection through `trace`). To get the body inline, pass at least one step: `[{full: true}]` for everything, `[{tail: 50}]` for the last 50 lines, `[{grep: \"err\"}]` for matches, or chain — `[{head: 100}, {tail: 50}]` is a sliding window from line 51 to 100. Steps apply in order; the implicit start is the full body. Each call is stateless (no cwd or shell state carries over, use `cd /path && cmd`). Each call has a time limit (default 600s); for a longer-running job, start it detached and poll — e.g. \"nohup sh -c 'long-cmd; echo $? > /tmp/job.rc' > /tmp/job.out 2>&1 &\", then read /tmp/job.rc later."
+        description = "**DO NOT pipe through `tail` / `head` / `grep` in the shell command — use the `op` pipeline instead.** Shell-side pipes scope before the daemon sees the bytes, so `trace` only has the post-pipe slice; double-scoping triggers an advisory `note` on the result.\n\nRun a shell command on a host from list_hosts. Returns the exit code, line counts, and (optionally) the scoped output. **Shell semantics depend on the remote OS**: POSIX hosts run the command under the user's login shell (bash/sh/zsh as configured); Windows hosts run it under whatever OpenSSH has set as the default shell (typically PowerShell or cmd.exe — `;` or `&&` for sequencing, `$env:VAR` under PowerShell, `%VAR%` under cmd.exe). Output bytes come back in the remote console code page (UTF-8 on POSIX, whatever `chcp` reports on Windows: e.g. 932 = Shift_JIS, 437 = OEM US) and are decoded on the daemon side, so callers always see UTF-8 strings. `op` is an ordered pipeline of steps — omit it or pass `[]` to get the metadata only (the full output stays in the per-session trace buffer for inspection through `trace`). To get the body inline, pass at least one step: `[{full: true}]` for everything, `[{tail: 50}]` for the last 50 lines, `[{grep: \"err\"}]` for matches, or chain — `[{head: 100}, {tail: 50}]` is a sliding window from line 51 to 100. Steps apply in order; the implicit start is the full body. Each call is stateless (no cwd or shell state carries over, use `cd /path && cmd`). Each call has a time limit (default 600s); for a longer-running job, start it detached and poll — e.g. \"nohup sh -c 'long-cmd; echo $? > /tmp/job.rc' > /tmp/job.out 2>&1 &\", then read /tmp/job.rc later."
     )]
     async fn exec(&self, params: Parameters<ExecParams>) -> Result<Json<ExecResult>, String> {
         let ExecParams { host, command, op } = params.0;
@@ -338,6 +338,11 @@ impl SshMcpServer {
             None => return Err(format!("unknown host {host:?}")),
         };
 
+        // The remote runs the command verbatim. The pool reads its
+        // pooled connection's encoding (probed once at connect time)
+        // and decodes the returned bytes accordingly, so the daemon
+        // hands back UTF-8 strings regardless of whether the host is a
+        // UTF-8 POSIX box or a CP932 Japanese Windows host.
         let result = self.pool.exec(&config, &host, &command, timeout).await;
         match &result {
             Ok(output) => self
