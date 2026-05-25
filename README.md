@@ -29,8 +29,9 @@ for gated hosts. The same gate covers command execution and file transfer.
 
 ## Tools
 
-The MCP server exposes six tools. All of them take a `host` argument that
-must be an alias from `list_hosts`.
+The MCP server exposes seven tools. All of them except `list_hosts`,
+`trace`, and `propose_host` take a `host` argument that must be an alias
+from `list_hosts`.
 
 | Tool | What it does |
 |---|---|
@@ -40,6 +41,7 @@ must be an alias from `list_hosts`.
 | `put` | Symmetric: uploads a local file or directory. If the remote destination is an existing directory the entry lands inside; otherwise it replaces. Returns wire bytes (same meaning as `get`). |
 | `sync_get` / `sync_put` | Mirror a directory in either direction. Both paths are treated as roots: files in the destination that are absent from the source are deleted; files matching by sha-256 are skipped. Returns per-op counts and the wire bytes for the files that actually moved. |
 | `trace` | Re-inspects the full detail of a recent tool call from a per-session ring buffer (depth 5, 10 MiB per entry). `op` is the same pipeline shape as `exec`, but required (at least one step — pass `[{full: true}]` for the whole body). Accepts a `stream` selector (`stdout` / `stderr` / `both`, default `both`) for exec entries. `grep` matches the bare line text, so a pattern that worked on the original `exec` result keeps working. Transfer entries come back as `<verb> <path>` lines. |
+| `propose_host` | Appends a *pending* host entry to `ssh-hosts.toml` for a freshly spun-up cloud VM (or similar). The entry is written with `disabled = true` plus an `expires_at` (required, RFC 3339, at most 30 days out); **the user has to open the TOML and remove that line for the host to become usable** — that hand edit is the trust gate. The server picks the alias (`tmp-` + 6 random hex chars) and hard-codes `policy = ["claude"]`; the input only supplies `hostname`, `user`, `purpose`, `expires_at`, and the optional `port`, `tags`, `proxy_jump`. Returns the alias, the absolute config path, the appended TOML snippet, and a short activation hint to echo to the user. Example: `{"hostname": "13.78.10.5", "user": "azureuser", "purpose": "azure scratch box", "expires_at": "2026-05-27T19:30:00+09:00"}`. |
 
 The `op` pipeline on `exec` and `trace` exists so scoping happens through the
 tool, not through `tail` / `head` / `grep` pipes in the shell command itself
@@ -119,6 +121,13 @@ user     = "deploy"
 purpose  = "Another staging host with shared baseline + extra restrict"
 policy   = [{ def = "company-baseline" }, "claude"]
 ```
+
+Two optional fields on every host entry control ephemerality:
+
+| Field | Effect |
+|---|---|
+| `expires_at` | RFC 3339 datetime (e.g. `2026-05-27T19:30:00+09:00`). When the daemon next loads the file, any host whose `expires_at` has passed is removed from the in-memory inventory **and from the TOML file on disk** (formatting and comments on surviving entries are preserved). Add it by hand to anything you want auto-cleaned, or let `propose_host` set it. |
+| `disabled` | Boolean, default `false`. When `true` the entry is parsed but skipped — it does not appear in `list_hosts` and `exec` (and friends) fail with "unknown host". This is the activation gate `propose_host` uses; flip it to `false` (or delete the line) by hand to enable a pending entry. |
 
 A host's `policy` is a set of gates composed strictest-wins:
 

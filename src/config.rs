@@ -8,6 +8,7 @@ use std::fmt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use jiff::Timestamp;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer};
 
@@ -167,6 +168,22 @@ pub struct HostEntry {
     pub exclude: Vec<String>,
     /// Inline rules consumed by the `def` gate, from `[hosts.<alias>.def]`.
     pub def: Option<Permissions>,
+    /// RFC 3339 datetime at which this entry stops being usable. When in the
+    /// past, the entry is GC'd from the TOML file at the next load. When in
+    /// the future the entry is treated as ephemeral but otherwise behaves
+    /// normally. Absent means "no expiry".
+    ///
+    /// Set automatically by `propose_host`; users may also add it by hand to
+    /// any entry they want auto-cleaned.
+    #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
+    pub expires_at: Option<Timestamp>,
+    /// When true, the entry is parsed but **not** registered as a host —
+    /// `list_hosts` does not show it and `exec` (and friends) fail with
+    /// "unknown host". This is the activation gate for entries created by
+    /// `propose_host`: the user must hand-edit the TOML to flip it before
+    /// the host can be used.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 /// The `[defaults]` table.
@@ -209,11 +226,43 @@ impl HostsConfig {
     /// Read and parse the config from disk.
     ///
     /// The file is read fresh on every call: it is small, and dynamic reload
-    /// avoids the complexity of cache invalidation.
+    /// avoids the complexity of cache invalidation. Two extra passes run
+    /// before the result is returned:
+    ///
+    /// 1. **GC of expired entries.** Any host whose `expires_at` is in the
+    ///    past is removed both from the in-memory config and from the TOML
+    ///    file on disk. Formatting and comments of the surviving entries are
+    ///    preserved via `toml_edit`. A GC pass that fails to write back is
+    ///    not fatal — the in-memory drop still happens.
+    /// 2. **Disabled-entry filtering.** Entries with `disabled = true` are
+    ///    parsed (so the GC can still expire them) but dropped from the
+    ///    returned `hosts` map so they cannot be addressed by `exec` or shown
+    ///    by `list_hosts`.
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        Self::parse(&text)
+        let mut config = Self::parse(&text)?;
+        let now = Timestamp::now();
+        let expired: Vec<String> = config
+            .hosts
+            .iter()
+            .filter_map(|(alias, entry)| match entry.expires_at {
+                Some(ts) if ts < now => Some(alias.clone()),
+                _ => None,
+            })
+            .collect();
+        if !expired.is_empty() {
+            for alias in &expired {
+                config.hosts.remove(alias);
+            }
+            // Best-effort: if rewriting the file fails (read-only mount, race
+            // with a hand edit), leave the file alone and just rely on
+            // in-memory removal for this load. The entry will re-expire on
+            // the next load attempt.
+            let _ = remove_entries_from_toml(path, &text, &expired);
+        }
+        config.hosts.retain(|_, entry| !entry.disabled);
+        Ok(config)
     }
 
     /// Look up a host by its alias.
@@ -228,6 +277,64 @@ impl HostsConfig {
             .or(self.defaults.exec_timeout_secs)
             .unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS)
     }
+}
+
+/// Accept `expires_at` as either a native TOML datetime (the common form,
+/// e.g. `expires_at = 2026-05-27T19:30:00+09:00`) or a quoted RFC 3339
+/// string. `toml` serializes datetimes as a tagged map, which jiff's own
+/// serde adapter does not understand — so we render whatever shape we got
+/// to its lexical form and feed that to jiff.
+fn deserialize_optional_timestamp<'de, D>(deserializer: D) -> Result<Option<Timestamp>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Dt(toml::value::Datetime),
+        Str(String),
+    }
+
+    let value: Option<Raw> = Option::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(Raw::Dt(dt)) => dt
+            .to_string()
+            .parse::<Timestamp>()
+            .map(Some)
+            .map_err(|e| D::Error::custom(format!("expires_at: {e}"))),
+        Some(Raw::Str(s)) => s
+            .parse::<Timestamp>()
+            .map(Some)
+            .map_err(|e| D::Error::custom(format!("expires_at: {e}"))),
+    }
+}
+
+/// Rewrite `path` with the given aliases removed from its `[hosts.<alias>]`
+/// table. Formatting and comments on surviving entries are preserved via
+/// `toml_edit`. Only used by GC; `propose_host` has its own writer that
+/// appends rather than removes.
+fn remove_entries_from_toml(path: &Path, text: &str, aliases: &[String]) -> Result<()> {
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("failed to parse {} for GC", path.display()))?;
+    if let Some(hosts) = doc.get_mut("hosts").and_then(|item| item.as_table_mut()) {
+        for alias in aliases {
+            hosts.remove(alias);
+        }
+    }
+    let new_text = doc.to_string();
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .with_context(|| format!("creating temp file next to {}", path.display()))?;
+    use std::io::Write;
+    tmp.write_all(new_text.as_bytes())
+        .with_context(|| format!("writing GC'd config to temp file for {}", path.display()))?;
+    tmp.persist(path)
+        .with_context(|| format!("replacing {} with GC'd config", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -366,6 +473,65 @@ mod tests {
         let shared = config.named_def("shared").expect("named def should parse");
         assert_eq!(shared.allow, ["Bash(systemctl status:*)"]);
         assert_eq!(shared.deny, ["Bash(rm:*)"]);
+    }
+
+    #[test]
+    fn parses_expires_at_and_disabled() {
+        let config = HostsConfig::parse(
+            r#"
+            [hosts.tmp-a3f2k9]
+            hostname = "13.0.0.1"
+            user = "ubuntu"
+            purpose = "azure scratch"
+            policy = ["claude"]
+            expires_at = 2026-05-27T19:30:00+09:00
+            disabled = true
+        "#,
+        )
+        .unwrap();
+        let entry = config.host("tmp-a3f2k9").unwrap();
+        assert!(entry.disabled);
+        assert!(entry.expires_at.is_some());
+    }
+
+    #[test]
+    fn load_skips_disabled_and_gcs_expired() {
+        // Build a config with three entries: one active, one disabled (must
+        // be hidden from the loaded map but kept in the file), one already
+        // expired (must be removed from both the map and the file). Round-
+        // trip through disk so GC actually runs.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ssh-hosts.toml");
+        let body = r#"
+[hosts.live]
+hostname = "10.0.0.1"
+purpose = "live"
+policy = ["free"]
+
+[hosts.tmp-pending]
+hostname = "10.0.0.2"
+purpose = "pending"
+policy = ["claude"]
+disabled = true
+expires_at = 2099-01-01T00:00:00Z
+
+[hosts.tmp-stale]
+hostname = "10.0.0.3"
+purpose = "stale"
+policy = ["claude"]
+expires_at = 2000-01-01T00:00:00Z
+"#;
+        std::fs::write(&path, body).unwrap();
+        let config = HostsConfig::load(&path).unwrap();
+        // Live is reachable; disabled and stale are not.
+        assert!(config.host("live").is_some());
+        assert!(config.host("tmp-pending").is_none());
+        assert!(config.host("tmp-stale").is_none());
+        // On disk: live and tmp-pending remain, tmp-stale was GC'd out.
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("[hosts.live]"));
+        assert!(after.contains("[hosts.tmp-pending]"));
+        assert!(!after.contains("[hosts.tmp-stale]"));
     }
 
     #[test]

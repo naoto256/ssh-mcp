@@ -41,13 +41,13 @@ pub struct ExecParams {
     /// array to skip returning stdout/stderr entirely — the result then
     /// carries just the exit code and counts, and the full output stays in
     /// the trace buffer for later inspection through `trace`. To get the
-    /// body inline, pass at least one step: `[{full: true}]` for
-    /// everything, `[{tail: 50}]` for the last 50, `[{grep: "err"}]` for
-    /// matching lines, or chain — `[{head: 100}, {tail: 50}, {grep: "x"}]`
-    /// reads the first 100, then keeps the last 50 of those (a sliding
-    /// window from line 51 to 100), then greps. The implicit starting
-    /// point is the full body, so `{full: true}` only needs to be written
-    /// when it's the lone step.
+    /// body inline, pass at least one step: `[{"full": true}]` for
+    /// everything, `[{"tail": 50}]` for the last 50, `[{"grep": "err"}]`
+    /// for matching lines, or chain — `[{"head": 100}, {"tail": 50},
+    /// {"grep": "x"}]` reads the first 100, then keeps the last 50 of
+    /// those (a sliding window from line 51 to 100), then greps. The
+    /// implicit starting point is the full body, so `{"full": true}` only
+    /// needs to be written when it's the lone step.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub op: Vec<OpStep>,
 }
@@ -86,8 +86,8 @@ pub struct TraceParams {
     /// Output scope as an ordered pipeline of steps, applied to the
     /// recorded body. At least one step is required (an empty pipeline is
     /// rejected — call `exec` with an empty op if you only want metadata).
-    /// Each step is one of `{full: true}`, `{head: N}`, `{tail: N}`, or
-    /// `{grep: STR}`; chain them to compose. `grep` matches the raw line
+    /// Each step is one of `{"full": true}`, `{"head": N}`, `{"tail": N}`,
+    /// or `{"grep": "STR"}`; chain them to compose. `grep` matches the raw line
     /// text — never the `stdout:` / `stderr:` prefix — so a pattern that
     /// worked on the original `exec` result keeps working here.
     pub op: Vec<OpStep>,
@@ -221,6 +221,60 @@ pub struct TransferResult {
     /// sizes. Useful as a rough transfer-cost indicator, not as a file-
     /// size measurement.
     pub bytes: u64,
+}
+
+/// Arguments to `propose_host`.
+///
+/// The shape mirrors the on-disk `[hosts.<alias>]` table for the fields the
+/// model is allowed to set. `alias`, `policy`, and `disabled` are not in
+/// here — the server picks the alias, hard-codes the policy to `["claude"]`,
+/// and always writes `disabled = true` so the entry is inactive until the
+/// user edits the TOML by hand.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ProposeHostParams {
+    /// The host's address — IP literal or DNS name.
+    pub hostname: String,
+    /// The login user.
+    pub user: String,
+    /// Short human-readable description of what the host is for. Shown in
+    /// `list_hosts` once the entry is activated.
+    pub purpose: String,
+    /// Auto-expiry time as an RFC 3339 datetime, e.g.
+    /// `"2026-05-27T19:30:00+09:00"`. Must be in the future and no more
+    /// than 30 days out — the daemon removes the entry from the TOML on the
+    /// next load after this passes.
+    pub expires_at: String,
+    /// SSH port. Defaults to 22.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Optional free-form tags carried into the entry's `tags` array.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Aliases of jump hosts to chain through, nearest hop first. Each must
+    /// exist as an active (non-disabled, non-expired) host in the inventory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proxy_jump: Vec<String>,
+}
+
+/// The result of `propose_host`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ProposeHostResult {
+    /// Always `"proposed"` on success. Surfaces only as a sanity flag for
+    /// the caller — the real signal is that the call returned at all.
+    pub status: String,
+    /// The alias the server assigned (e.g. `"tmp-a3f2k9"`). Will become
+    /// addressable from `exec` once the user removes `disabled = true`.
+    pub alias: String,
+    /// Absolute path of the TOML file the entry was appended to. Tell the
+    /// user to open this and flip `disabled`.
+    pub config_path: String,
+    /// The exact block that was appended, including the activation comment.
+    /// Lets the model echo it back to the user verbatim.
+    pub snippet: String,
+    /// Short imperative sentence describing how to activate the entry.
+    pub activate_hint: String,
+    /// Echo of the validated `expires_at` (RFC 3339).
+    pub expires_at: String,
 }
 
 /// The result of a `sync_get` / `sync_put` call: archive payload size plus

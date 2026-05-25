@@ -6,5 +6,6 @@
 
 pub(super) mod exec;
 pub(super) mod list_hosts;
+pub(super) mod propose_host;
 pub(super) mod trace;
 pub(super) mod transfer;
