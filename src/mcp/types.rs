@@ -254,6 +254,15 @@ pub struct ProposeHostParams {
     /// exist as an active (non-disabled, non-expired) host in the inventory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proxy_jump: Vec<String>,
+    /// Pinned host public key in OpenSSH single-line format
+    /// (e.g. `"ssh-ed25519 AAAA... comment"`). When supplied, the daemon
+    /// verifies the live server key against this value on connect instead
+    /// of consulting `~/.ssh/known_hosts` — the right shape for a freshly
+    /// provisioned VM whose key the caller already harvested out-of-band
+    /// (e.g. from the cloud provider's console). Omit to fall back to
+    /// `known_hosts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_key: Option<String>,
 }
 
 /// The result of `propose_host`.

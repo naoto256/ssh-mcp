@@ -12,6 +12,8 @@ use russh::client;
 use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::AgentClient;
 
+use russh::keys::ssh_key;
+
 use super::handler::StrictHostKey;
 use crate::config::{HostEntry, HostsConfig};
 
@@ -37,6 +39,11 @@ pub struct Hop {
     pub hostname: String,
     pub port: u16,
     pub user: String,
+    /// Pinned host public key in OpenSSH single-line form, copied verbatim
+    /// from the host entry. Parsing happens at `connect` time so a malformed
+    /// pin surfaces near the SSH handshake rather than during chain
+    /// resolution.
+    pub host_key: Option<String>,
 }
 
 /// Resolve a host's connection chain from the inventory: each jump hop,
@@ -54,6 +61,7 @@ pub fn resolve_chain(config: &HostsConfig, host_alias: &str) -> Result<Vec<Hop>>
                 hostname: entry.hostname.clone(),
                 port: port_of(entry),
                 user: user_of(entry),
+                host_key: entry.host_key.clone(),
             })
         })
         .collect()
@@ -109,7 +117,7 @@ impl SshConnector {
         let mut handle = client::connect(
             self.config.clone(),
             (first.hostname.as_str(), first.port),
-            self.host_key_handler(&first.hostname, first.port),
+            self.host_key_handler(first)?,
         )
         .await
         .with_context(|| format!("failed to connect to {:?}", first.alias))?;
@@ -129,7 +137,7 @@ impl SshConnector {
             let mut next = client::connect_stream(
                 self.config.clone(),
                 tunnel.into_stream(),
-                self.host_key_handler(&hop.hostname, hop.port),
+                self.host_key_handler(hop)?,
             )
             .await
             .with_context(|| format!("SSH handshake with {:?} failed", hop.alias))?;
@@ -139,8 +147,31 @@ impl SshConnector {
         Ok(handle)
     }
 
-    fn host_key_handler(&self, hostname: &str, port: u16) -> StrictHostKey {
-        StrictHostKey::new(hostname, port, self.known_hosts.clone())
+    /// Build the per-hop host-key handler. When the hop carries a pinned
+    /// `host_key`, the handler accepts only that key and never consults
+    /// `~/.ssh/known_hosts`; otherwise it falls back to `known_hosts`.
+    fn host_key_handler(&self, hop: &Hop) -> Result<StrictHostKey> {
+        match &hop.host_key {
+            Some(raw) => {
+                let parsed = ssh_key::PublicKey::from_openssh(raw.trim()).with_context(|| {
+                    format!(
+                        "host {:?} has a malformed host_key in the inventory",
+                        hop.alias
+                    )
+                })?;
+                Ok(StrictHostKey::with_pinned(
+                    &hop.hostname,
+                    hop.port,
+                    self.known_hosts.clone(),
+                    parsed,
+                ))
+            }
+            None => Ok(StrictHostKey::new(
+                &hop.hostname,
+                hop.port,
+                self.known_hosts.clone(),
+            )),
+        }
     }
 }
 

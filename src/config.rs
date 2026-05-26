@@ -177,6 +177,14 @@ pub struct HostEntry {
     /// any entry they want auto-cleaned.
     #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
     pub expires_at: Option<Timestamp>,
+    /// Pinned host public key in OpenSSH single-line format
+    /// (e.g. `"ssh-ed25519 AAAA... comment"`). When present, host-key
+    /// verification short-circuits `~/.ssh/known_hosts` and accepts only
+    /// this exact key — handy for ephemeral hosts created through
+    /// `propose_host` where adding the key to `known_hosts` would leave a
+    /// stale entry behind. Absent means "fall back to `known_hosts`".
+    #[serde(default)]
+    pub host_key: Option<String>,
     /// When true, the entry is parsed but **not** registered as a host —
     /// `list_hosts` does not show it and `exec` (and friends) fail with
     /// "unknown host". This is the activation gate for entries created by
@@ -492,6 +500,39 @@ mod tests {
         let entry = config.host("tmp-a3f2k9").unwrap();
         assert!(entry.disabled);
         assert!(entry.expires_at.is_some());
+    }
+
+    #[test]
+    fn parses_host_key_field() {
+        let config = HostsConfig::parse(
+            r#"
+            [hosts.tmp-pinned]
+            hostname = "10.0.0.5"
+            purpose = "pinned"
+            policy = ["claude"]
+            host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBmHbS/p65xQO3uVuJ1xxx comment"
+        "#,
+        )
+        .unwrap();
+        let entry = config.host("tmp-pinned").unwrap();
+        assert_eq!(
+            entry.host_key.as_deref(),
+            Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBmHbS/p65xQO3uVuJ1xxx comment")
+        );
+    }
+
+    #[test]
+    fn host_key_absent_by_default() {
+        let config = HostsConfig::parse(
+            r#"
+            [hosts.h]
+            hostname = "10.0.0.5"
+            purpose = "p"
+            policy = ["free"]
+        "#,
+        )
+        .unwrap();
+        assert!(config.host("h").unwrap().host_key.is_none());
     }
 
     #[test]
