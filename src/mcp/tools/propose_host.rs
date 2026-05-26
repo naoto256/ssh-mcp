@@ -69,8 +69,7 @@ struct Plan {
     proxy_jump: Vec<String>,
     expires_at: Timestamp,
     /// OpenSSH-formatted pinned host key, already validated as parseable.
-    /// `None` means "fall back to `~/.ssh/known_hosts` at connect time".
-    host_key: Option<String>,
+    host_key: String,
 }
 
 fn validate(params: &ProposeHostParams, config_path: &Path) -> Result<Plan, String> {
@@ -142,20 +141,17 @@ fn validate(params: &ProposeHostParams, config_path: &Path) -> Result<Plan, Stri
         proxy_jump.push(hop.to_string());
     }
 
-    // Optional pinned host key. Only the OpenSSH-format parseability is
-    // checked here; matching against the live server key happens at connect
-    // time in `StrictHostKey::check_server_key`.
-    let host_key = match params.host_key.as_deref() {
-        None => None,
-        Some(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                return Err("host_key must not be empty when set".into());
-            }
-            ssh_key::PublicKey::from_openssh(trimmed)
-                .map_err(|e| format!("host_key is not a valid OpenSSH public key: {e}"))?;
-            Some(trimmed.to_string())
+    // Pinned host key. Only the OpenSSH-format parseability is checked here;
+    // matching against the live server key happens at connect time in
+    // `StrictHostKey::check_server_key`.
+    let host_key = {
+        let trimmed = params.host_key.trim();
+        if trimmed.is_empty() {
+            return Err("host_key must not be empty".into());
         }
+        ssh_key::PublicKey::from_openssh(trimmed)
+            .map_err(|e| format!("host_key is not a valid OpenSSH public key: {e}"))?;
+        trimmed.to_string()
     };
 
     let alias = pick_alias(config_path)?;
@@ -263,11 +259,9 @@ fn write_entry(config_path: &Path, plan: &Plan) -> Result<String, String> {
         .parse()
         .map_err(|e| format!("internal: serializing expires_at: {e}"))?;
     table["expires_at"] = value(dt);
-    // Pinned host key, if any. Lives between `expires_at` and `disabled` so
-    // a reader sees the activation comment last.
-    if let Some(hk) = &plan.host_key {
-        table["host_key"] = value(hk.clone());
-    }
+    // Pinned host key. Lives between `expires_at` and `disabled` so a reader
+    // sees the activation comment last.
+    table["host_key"] = value(plan.host_key.clone());
     // Activation gate. The trailing comment is what the user actually reads
     // when they open the file — keep it on this line.
     let mut disabled_item = value(true);
@@ -350,12 +344,13 @@ mod tests {
             port: None,
             tags: vec![],
             proxy_jump: vec![],
-            host_key: None,
+            host_key: VALID_HOST_KEY.into(),
         }
     }
 
-    /// A real, parseable ed25519 public key. Reused across host_key tests.
-    /// Generated from a throwaway keypair — never used to auth anywhere.
+    /// A real, parseable ed25519 public key. Reused across tests as the
+    /// default `host_key` injected by the `params` helper. Generated from a
+    /// throwaway keypair — never used to auth anywhere.
     const VALID_HOST_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDUPtEBVQ314blItt/QQgFgNvrPgU/eEZY1b6kj9IgiF test@example";
 
     fn future_iso(days: i64) -> String {
@@ -471,7 +466,7 @@ policy = ["free"]
         let dir = tempfile::tempdir().unwrap();
         let path = fresh_config(dir.path(), "");
         let mut p = params("10.0.0.1", "ubuntu", "scratch", &future_iso(1));
-        p.host_key = Some("not a key".into());
+        p.host_key = "not a key".into();
         assert!(validate(&p, &path).is_err());
     }
 
@@ -480,35 +475,23 @@ policy = ["free"]
         let dir = tempfile::tempdir().unwrap();
         let path = fresh_config(dir.path(), "");
         let mut p = params("10.0.0.1", "ubuntu", "scratch", &future_iso(1));
-        p.host_key = Some("   ".into());
+        p.host_key = "   ".into();
         assert!(validate(&p, &path).is_err());
     }
 
     #[test]
-    fn accepts_a_well_formed_host_key_and_writes_it() {
+    fn writes_the_host_key_between_expires_at_and_disabled() {
         let dir = tempfile::tempdir().unwrap();
         let path = fresh_config(dir.path(), "");
-        let mut p = params("10.0.0.1", "ubuntu", "scratch", &future_iso(1));
-        p.host_key = Some(VALID_HOST_KEY.into());
+        let p = params("10.0.0.1", "ubuntu", "scratch", &future_iso(1));
         let plan = validate(&p, &path).unwrap();
-        assert_eq!(plan.host_key.as_deref(), Some(VALID_HOST_KEY));
+        assert_eq!(plan.host_key, VALID_HOST_KEY);
         let snippet = write_entry(&path, &plan).unwrap();
-        // The host_key line shows up between expires_at and disabled.
         assert!(snippet.contains("host_key = "));
         assert!(snippet.contains(VALID_HOST_KEY));
         let hk_pos = snippet.find("host_key").unwrap();
         let dis_pos = snippet.find("disabled").unwrap();
         assert!(hk_pos < dis_pos, "host_key must precede disabled");
-    }
-
-    #[test]
-    fn omits_host_key_line_when_unset() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = fresh_config(dir.path(), "");
-        let p = params("10.0.0.1", "ubuntu", "scratch", &future_iso(1));
-        let plan = validate(&p, &path).unwrap();
-        let snippet = write_entry(&path, &plan).unwrap();
-        assert!(!snippet.contains("host_key"));
     }
 
     #[test]

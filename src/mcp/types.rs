@@ -284,14 +284,13 @@ pub struct ProposeHostParams {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proxy_jump: Vec<String>,
     /// Pinned host public key in OpenSSH single-line format
-    /// (e.g. `"ssh-ed25519 AAAA... comment"`). When supplied, the daemon
-    /// verifies the live server key against this value on connect instead
-    /// of consulting `~/.ssh/known_hosts` — the right shape for a freshly
-    /// provisioned VM whose key the caller already harvested out-of-band
-    /// (e.g. from the cloud provider's console). Omit to fall back to
-    /// `known_hosts`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_key: Option<String>,
+    /// (e.g. `"ssh-ed25519 AAAA... comment"`). The daemon verifies the live
+    /// server key against this value on connect instead of consulting
+    /// `~/.ssh/known_hosts`. Required so every `propose_host` entry is
+    /// self-contained — harvest it out-of-band from the cloud provider's
+    /// console or by running `ssh-keyscan` via `exec` before calling this
+    /// tool.
+    pub host_key: String,
 }
 
 /// The result of `propose_host`.
