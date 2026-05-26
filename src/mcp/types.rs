@@ -30,6 +30,35 @@ pub struct HostList {
     pub hosts: Vec<HostSummary>,
 }
 
+/// One public identity held by the user's SSH agent, as surfaced by
+/// `list_agent_keys`. Mirrors what `ssh-add -L` would print — public bytes
+/// only, no private key material.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AgentKey {
+    /// The OpenSSH algorithm name, e.g. `"ssh-ed25519"`, `"ssh-rsa"`,
+    /// `"ecdsa-sha2-nistp256"`.
+    // `type` is a reserved word; `r#type` lets us keep the wire name
+    // unchanged (serde uses the raw identifier without the `r#`).
+    pub r#type: String,
+    /// The comment attached to the agent identity, often `user@host`. May
+    /// be empty.
+    pub comment: String,
+    /// SHA-256 fingerprint in the canonical OpenSSH form
+    /// (`"SHA256:..."`).
+    pub fingerprint: String,
+    /// The full OpenSSH single-line public key — paste this into a host's
+    /// `~/.ssh/authorized_keys` to let the agent's holder sign in.
+    pub public_key: String,
+}
+
+/// The `list_agent_keys` result. Wrapped in an object because MCP requires
+/// object roots, and so an empty agent surfaces as `{"keys": []}` rather
+/// than a bare `[]`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AgentKeyList {
+    pub keys: Vec<AgentKey>,
+}
+
 /// Arguments to `exec`.
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ExecParams {

@@ -37,8 +37,9 @@ mod tools;
 pub mod types;
 
 pub use types::{
-    ExecParams, ExecResult, GetParams, HostList, HostSummary, ProposeHostParams, ProposeHostResult,
-    PutParams, SyncGetParams, SyncPutParams, SyncResult, TraceParams, TraceResult, TransferResult,
+    AgentKey, AgentKeyList, ExecParams, ExecResult, GetParams, HostList, HostSummary,
+    ProposeHostParams, ProposeHostResult, PutParams, SyncGetParams, SyncPutParams, SyncResult,
+    TraceParams, TraceResult, TransferResult,
 };
 
 /// One MCP session's view of the daemon. Cheap to clone — it shares the
@@ -155,6 +156,14 @@ impl SshMcpServer {
         params: Parameters<ProposeHostParams>,
     ) -> Result<Json<ProposeHostResult>, String> {
         tools::propose_host::handle(self, params).await
+    }
+
+    #[tool(
+        name = "list_agent_keys",
+        description = "List the public keys currently held by the user's SSH agent ($SSH_AUTH_SOCK). Equivalent to `ssh-add -L`. Use this when you need to tell the user which key to register with a freshly provisioned host (paste one of the `public_key` strings into the host's `authorized_keys`), or to diagnose why an `exec` call fails with \"SSH agent authentication failed\".\n\nExamples:\n  {}\n      → list every identity loaded into the agent\n\nReturns one entry per identity, each with `type`, `comment`, `fingerprint` (SHA-256), and the full OpenSSH `public_key` line. Certificates are not included. No arguments."
+    )]
+    async fn list_agent_keys(&self) -> Result<Json<AgentKeyList>, String> {
+        tools::list_agent_keys::handle(self).await
     }
 }
 

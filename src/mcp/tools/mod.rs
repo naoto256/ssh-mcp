@@ -5,6 +5,7 @@
 //! live in tool-sized files.
 
 pub(super) mod exec;
+pub(super) mod list_agent_keys;
 pub(super) mod list_hosts;
 pub(super) mod propose_host;
 pub(super) mod trace;
