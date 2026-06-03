@@ -12,6 +12,10 @@ use crate::mcp::SshMcpServer;
 use crate::mcp::types::{ExecParams, ExecResult};
 use crate::trace::{TraceEntry, apply_pipeline, chunks_to_lines, validate_pipeline};
 
+/// The trace buffer's 10 MiB cap is a storage guardrail for later inspection;
+/// this inline cap keeps a single tool response to a size an LLM can read at once.
+const INLINE_BYTE_CAP: usize = 64 * 1024;
+
 pub(in crate::mcp) async fn handle(
     server: &SshMcpServer,
     params: Parameters<ExecParams>,
@@ -81,13 +85,15 @@ pub(in crate::mcp) async fn handle(
     } else {
         apply_pipeline(stderr_all, &op)?
     };
-    let note = detect_trailing_scope_pipe(&command).map(|program| {
+    let trailing_pipe_note = detect_trailing_scope_pipe(&command).map(|program| {
         format!(
             "the command ends in `| {program}` — the shell scoped the output before the \
              daemon saw it, so the trace buffer only holds what survived the pipe. Pass \
              `op` (tail/head/grep) instead and let `trace` re-scope from the full stream."
         )
     });
+    let (stdout, stderr, cap_note) = cap_inline(stdout, stderr);
+    let note = cap_note.or(trailing_pipe_note);
     Ok(Json(ExecResult {
         exit_code: output.exit_code,
         stdout,
@@ -96,6 +102,30 @@ pub(in crate::mcp) async fn handle(
         stderr_lines,
         note,
     }))
+}
+
+fn cap_inline(
+    stdout: Vec<String>,
+    stderr: Vec<String>,
+) -> (Vec<String>, Vec<String>, Option<String>) {
+    let stdout_bytes = output_lines_bytes(&stdout);
+    let stderr_bytes = output_lines_bytes(&stderr);
+    let total_bytes = stdout_bytes.saturating_add(stderr_bytes);
+    if total_bytes <= INLINE_BYTE_CAP {
+        return (stdout, stderr, None);
+    }
+
+    let total_lines = stdout.len().saturating_add(stderr.len());
+    let cap_kib = INLINE_BYTE_CAP / 1024;
+    let note = format!(
+        "inline output exceeded {cap_kib} KiB cap (actual: {total_bytes} bytes, {total_lines} lines) — \
+         full body is in the trace buffer; call `trace` with head/tail/grep to scope it"
+    );
+    (Vec::new(), Vec::new(), Some(note))
+}
+
+fn output_lines_bytes(lines: &[String]) -> usize {
+    lines.iter().map(|line| line.len().saturating_add(1)).sum()
 }
 
 /// If the command's last unquoted pipe targets a line-scoping program,
@@ -153,6 +183,45 @@ fn detect_trailing_scope_pipe(command: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cap_inline_keeps_output_below_the_cap() {
+        let stdout = vec!["x".repeat(INLINE_BYTE_CAP - 2)];
+        let stderr = vec![];
+
+        let (capped_stdout, capped_stderr, note) = cap_inline(stdout.clone(), stderr.clone());
+
+        assert_eq!(capped_stdout, stdout);
+        assert_eq!(capped_stderr, stderr);
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn cap_inline_clears_output_above_the_cap() {
+        let stdout = vec!["x".repeat(INLINE_BYTE_CAP)];
+        let stderr = vec![];
+
+        let (capped_stdout, capped_stderr, note) = cap_inline(stdout, stderr);
+
+        assert!(capped_stdout.is_empty());
+        assert!(capped_stderr.is_empty());
+        assert!(
+            note.as_deref()
+                .is_some_and(|note| note.contains("exceeded"))
+        );
+    }
+
+    #[test]
+    fn cap_inline_clears_both_streams_when_stdout_alone_is_huge() {
+        let stdout = vec!["x".repeat(INLINE_BYTE_CAP)];
+        let stderr = vec!["stderr survives only if combined size is within cap".to_string()];
+
+        let (capped_stdout, capped_stderr, note) = cap_inline(stdout, stderr);
+
+        assert!(capped_stdout.is_empty());
+        assert!(capped_stderr.is_empty());
+        assert!(note.is_some());
+    }
 
     #[test]
     fn detects_a_trailing_tail_pipe() {
