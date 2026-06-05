@@ -267,7 +267,12 @@ impl HostsConfig {
             // with a hand edit), leave the file alone and just rely on
             // in-memory removal for this load. The entry will re-expire on
             // the next load attempt.
-            let _ = remove_entries_from_toml(path, &text, &expired);
+            if let Err(err) = remove_entries_from_toml(path, &text, &expired) {
+                eprintln!(
+                    "ssh-mcp: warning: failed to remove expired hosts from {}: {err:#}",
+                    path.display()
+                );
+            }
         }
         config.hosts.retain(|_, entry| !entry.disabled);
         Ok(config)

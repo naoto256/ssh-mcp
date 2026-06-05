@@ -95,11 +95,12 @@ pub struct ExecResult {
     /// Total number of stderr lines produced, before the `op` filtered any
     /// out. `stderr.len()` is the kept count.
     pub stderr_lines: u32,
-    /// Advisory note from the daemon. Currently emitted when the command's
-    /// last unquoted pipe targets a line-scoping program (`tail`, `head`,
-    /// `grep`, `egrep`, `fgrep`, `rg`) — the shell will have already
-    /// dropped everything past that pipe, so the trace buffer only holds
-    /// the post-pipe slice. Pass the scope through `op` instead and let
+    /// Advisory note from the daemon. Emitted when inline output exceeds the
+    /// response byte cap and the full body is available through `trace`, or
+    /// when the command's last unquoted pipe targets a line-scoping program
+    /// (`tail`, `head`, `grep`, `egrep`, `fgrep`, `rg`) — the shell will have
+    /// already dropped everything past that pipe, so the trace buffer only
+    /// holds the post-pipe slice. Pass the scope through `op` instead and let
     /// `trace` re-scope from the full stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
