@@ -145,10 +145,10 @@ intent.
 
 ### 4.1 cp-merge semantics on `get` / `put`
 
-`get foo.txt /inbox/` and `get foo.txt /inbox/foo.txt` are
+`get foo.txt /inbox` and `get foo.txt /inbox/foo.txt` are
 different in standard Unix:
 
-- the first places `foo.txt` inside `/inbox/` (existing directory)
+- the first places `foo.txt` inside `/inbox` (existing directory)
 - the second replaces the file at `/inbox/foo.txt`
 
 `cp` and `rsync` both follow this rule. Earlier versions of ssh-mcp did
