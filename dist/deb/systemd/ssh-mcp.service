@@ -1,0 +1,16 @@
+[Unit]
+Description=ssh-mcp daemon (policy-gated SSH MCP server)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh-mcp daemon
+Restart=on-failure
+RestartSec=2
+
+# The daemon needs SSH_AUTH_SOCK to reach your SSH agent. Uncomment or adjust
+# the line that matches the user's agent setup.
+# Environment=SSH_AUTH_SOCK=%t/keyring/ssh
+# Environment=SSH_AUTH_SOCK=/run/user/%U/ssh-agent
+
+[Install]
+WantedBy=default.target

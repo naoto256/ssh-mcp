@@ -83,3 +83,38 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
         shell: bash
         run: ls -lh dist/*.tar.gz
+
+  deb:
+    name: Build Debian package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # pin-audit:2026-05-21 34e1148 | v4
+
+      - name: Install cargo-deb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cargo-deb
+
+      - name: Build Debian package
+        run: cargo deb --locked --output dist
+
+      - name: Upload release asset
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RELEASE_TAG}" ]; then
+            echo "release tag is required when dry_run is false" >&2
+            exit 1
+          fi
+
+          gh release upload "${RELEASE_TAG}" dist/*.deb --clobber
+
+      - name: Dry-run summary
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        shell: bash
+        run: ls -lh dist/*.deb
