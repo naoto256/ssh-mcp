@@ -66,12 +66,6 @@ brew install ssh-mcp
 brew services start ssh-mcp
 ```
 
-### Cargo (Rust users, macOS or Linux)
-
-```sh
-cargo install ssh-mcp
-```
-
 ### Debian / Ubuntu (.deb, Linux x86_64)
 
 Download `ssh-mcp_0.3.0-1_amd64.deb` from
@@ -93,6 +87,20 @@ Install it somewhere stable:
 
 ```sh
 cp target/release/ssh-mcp ~/.local/bin/ssh-mcp
+```
+
+### Why no crates.io?
+
+`ssh-mcp` is intentionally not published to crates.io. The name `ssh-mcp`
+is already held by an unrelated MCP server (a minimal SSH-over-MCP proxy
+that passes credentials through MCP parameters), and crates.io's flat,
+first-come-first-served namespace makes a clean, brand-aligned publish
+impractical. Distribution through Homebrew, a Debian package, and prebuilt
+release binaries serves users better in this case — Rust developers can
+still build from source via:
+
+```sh
+cargo install --git https://github.com/naoto256/ssh-mcp ssh-mcp
 ```
 
 ## Setup
