@@ -1,0 +1,17 @@
+{
+  "description": "ssh-mcp PreToolUse hook: delegate host-affecting ssh MCP tool calls to the resident ssh-mcp daemon policy gate.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__ssh__(exec|get|put|sync_get|sync_put)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/tools/ssh-mcp-hook.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
