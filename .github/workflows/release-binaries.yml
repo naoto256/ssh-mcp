@@ -91,9 +91,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # pin-audit:2026-05-21 34e1148 | v4
 
       - name: Install cargo-deb
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cargo-deb
+        run: cargo install --locked cargo-deb
 
       - name: Build Debian package
         run: cargo deb --locked --output dist
