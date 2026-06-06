@@ -9,6 +9,13 @@ homepage = "https://github.com/naoto256/ssh-mcp"
 readme = "README.md"
 keywords = ["mcp", "ssh", "claude-code", "codex", "automation"]
 categories = ["command-line-utilities", "development-tools"]
+exclude = [
+    ".agents",
+    ".claude-plugin",
+    ".github",
+    "dist",
+    "plugin",
+]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
