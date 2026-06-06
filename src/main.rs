@@ -22,6 +22,8 @@ enum Command {
     /// Run as a PreToolUse hook: a pure proxy that relays a policy query to
     /// the daemon.
     Hook,
+    /// Bootstrap an ssh-mcp.toml skeleton from ~/.ssh/config.
+    Import,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -30,5 +32,6 @@ fn main() -> anyhow::Result<()> {
         Command::Daemon => ssh_mcp::daemon::run(),
         Command::Serve => ssh_mcp::serve::run(),
         Command::Hook => ssh_mcp::hook::run(),
+        Command::Import => ssh_mcp::import::run(),
     }
 }
