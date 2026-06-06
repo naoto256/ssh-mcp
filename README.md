@@ -4,7 +4,8 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Release](https://img.shields.io/github/v/release/naoto256/ssh-mcp?sort=semver)](https://github.com/naoto256/ssh-mcp/releases)
 
-A policy-gated SSH execution MCP server for Claude Code, written in Rust.
+A policy-gated SSH execution MCP server for Claude Code and Codex, written in
+Rust.
 
 It presents a curated host inventory to the model and runs remote commands and
 file transfers through a per-host policy gate: hosts you are free to use run
@@ -16,11 +17,10 @@ you need to get it running.
 
 ## Why
 
-Claude Code can be run with a broad permission bypass, delegating control to a
-`PreToolUse` hook plus `permissions.*` rules. SSH does not fit that model well:
-every SSH target requires a confirmation prompt, even lab machines you are
-happy to let the agent use freely, and the purpose of each host has to be
-re-explained every session.
+Claude Code and Codex can both run external tools through MCP servers and
+host-side policy hooks. Raw SSH does not fit that model well: every SSH target
+needs its own trust decision, even lab machines you are happy to let the agent
+use freely, and the purpose of each host has to be re-explained every session.
 
 `ssh-mcp` moves SSH execution off the `Bash` tool onto structured MCP tools.
 The model reads the inventory itself via `list_hosts`, picks a host, and calls
@@ -52,7 +52,37 @@ pipeline shape lets the model compose narrowing steps (`[{head: 100},
 "give me nothing" default on `exec` (omit `op` to keep result context-light
 and pull what you need later through `trace`).
 
-## Build
+## Install
+
+Choose the installation path that matches the host running Claude Code or Codex.
+Windows is not currently supported as a daemon host; use WSL2 if you need to
+drive ssh-mcp from a Windows machine.
+
+### Homebrew (macOS arm64)
+
+```sh
+brew tap naoto256/ssh-mcp
+brew install ssh-mcp
+brew services start ssh-mcp
+```
+
+### Cargo (Rust users, macOS or Linux)
+
+```sh
+cargo install ssh-mcp
+```
+
+### Debian / Ubuntu (.deb, Linux x86_64)
+
+Download `ssh-mcp_0.3.0-1_amd64.deb` from
+[GitHub Releases](https://github.com/naoto256/ssh-mcp/releases), then:
+
+```sh
+sudo dpkg -i ssh-mcp_0.3.0-1_amd64.deb
+systemctl --user enable --now ssh-mcp
+```
+
+### Source build (advanced / contributors)
 
 ```sh
 cargo build --release
@@ -67,11 +97,12 @@ cp target/release/ssh-mcp ~/.local/bin/ssh-mcp
 
 ## Setup
 
-Four things need wiring (macOS or Linux with Claude Code). Windows is not
-currently supported **as a host for the daemon** — the daemon uses Unix
-Domain Sockets with peer-uid checks for its control channel; the equivalent
-on Windows would need a Named Pipe transport that has not been ported yet.
-Use WSL2 if you need to drive ssh-mcp from a Windows machine.
+Four things need wiring for a full Claude Code or Codex setup. Some install
+paths above already start the daemon; the remaining steps are the same. Windows
+is not currently supported **as a host for the daemon** — the daemon uses Unix
+Domain Sockets with peer-uid checks for its control channel; the equivalent on
+Windows would need a Named Pipe transport that has not been ported yet. Use WSL2
+if you need to drive ssh-mcp from a Windows machine.
 
 **Remote hosts** can be POSIX or Windows. The daemon probes each
 connection's shell family at connect time, picks the right command shapes
@@ -146,7 +177,7 @@ A host's `policy` is a set of gates composed strictest-wins:
 | `free` | Allow without prompt. Use for hosts you trust the agent on. |
 | `def` | Apply the rules written inline under `[hosts.<alias>.def]` (anonymous, host-local). |
 | `{ def = "name" }` | Apply the rules from a top-level `[def.<name>]` table, shared across hosts. Reference the same name from multiple hosts to reuse the ruleset. |
-| `claude` | Apply the rules from `~/.claude/settings.json` (user-level). |
+| `claude` | Apply the Claude Code user-level rules from `~/.claude/settings.json`. This gate name is historical; Codex users normally rely on the bundled plugin hook/settings instead of this file. |
 | `{ hook = "..." }` | Delegate to an external `PreToolUse` hook program. |
 
 A host's policy can mix any number of gates; the strictest decision wins
@@ -197,7 +228,7 @@ If the daemon cannot find the SSH agent, uncomment one of the
 ### 3. Plugin install (Claude Code / Codex)
 
 The in-tree [`plugin/`](plugin/) directory packages the MCP server definition,
-the `PreToolUse` policy hook, and Claude Code settings defaults for both
+the `PreToolUse` policy hook, and host-runtime settings defaults for both
 Claude Code and Codex. The plugin keeps the MCP server definition shared in
 `plugin/.mcp.json` and resolves the `ssh-mcp` binary through `PATH` by default.
 Set `SSH_MCP_BIN` if your host runtime needs an absolute binary path.
@@ -212,7 +243,7 @@ Claude Code:
 Codex:
 
 ```sh
-codex plugin marketplace add /absolute/path/to/ssh-mcp
+codex plugin marketplace add naoto256/ssh-mcp
 codex plugin add ssh-mcp@naoto256-ssh-mcp
 ```
 
@@ -221,10 +252,12 @@ Codex marketplace details, and migration notes from manual host configuration.
 After installing, review and trust the bundled hook in the host runtime before
 removing your manual `ssh` MCP server or hook entries.
 
-### 4. Manual Claude Code configuration
+### 4. Manual Claude Code configuration (CC-specific)
 
-If you are not using the plugin, register the MCP server and wire the policy
-hook by hand.
+If you are using Claude Code without the plugin, register the MCP server and
+wire the policy hook by hand. Codex users should prefer the plugin flow above;
+its command syntax and settings surface differ from Claude Code's
+`~/.claude.json` / `~/.claude/settings.json` files.
 
 Two parts: register the MCP server, then wire the policy hook.
 
