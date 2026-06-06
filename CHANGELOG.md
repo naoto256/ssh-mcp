@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-06-06
+
+### Added
+
+- Add bundled Claude Code and Codex plugin manifests for installing `ssh-mcp` as a plugin.
+- Add a shared plugin MCP server definition and `PreToolUse` policy hook wrapper for host-affecting SSH tools.
+- Add plugin settings defaults that protect `~/.ssh/ssh-mcp.toml`, `~/.ssh/ssh-mcp.ephem.toml`, and `~/.ssh/ssh-mcp/**` from agent edits.
+
 ## [0.2.3] - 2026-06-06
 
 ### Added
@@ -58,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add setup documentation, LaunchAgent template, Linux notes, public design documentation, end-to-end tests, and supply-chain audit configuration.
 - Add LICENSE files, CONTRIBUTING.md, README badges, CI action pin-audit metadata, and audit-log file mode hardening.
 
+[0.2.4]: https://github.com/naoto256/ssh-mcp/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/naoto256/ssh-mcp/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/naoto256/ssh-mcp/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/naoto256/ssh-mcp/compare/v0.2.0...v0.2.1
