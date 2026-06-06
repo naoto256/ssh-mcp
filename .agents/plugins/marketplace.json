@@ -1,0 +1,18 @@
+{
+  "name": "naoto256-ssh-mcp",
+  "plugins": [
+    {
+      "name": "ssh-mcp",
+      "description": "Policy-gated SSH execution over MCP, with a bundled PreToolUse policy hook.",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

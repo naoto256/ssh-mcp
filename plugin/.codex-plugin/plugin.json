@@ -1,0 +1,22 @@
+{
+  "name": "ssh-mcp",
+  "version": "0.2.4",
+  "description": "Policy-gated SSH execution MCP server for Claude Code and Codex. Bundles the ssh MCP server plus its PreToolUse policy hook.",
+  "author": {
+    "name": "Naoto Morishima"
+  },
+  "repository": "https://github.com/naoto256/ssh-mcp",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["mcp", "ssh", "policy", "claude-code", "codex"],
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "ssh-mcp",
+    "shortDescription": "Policy-gated SSH execution over MCP.",
+    "longDescription": "Expose curated SSH hosts as structured MCP tools and gate host-affecting calls through ssh-mcp's daemon-backed policy hook.",
+    "developerName": "Naoto Morishima",
+    "category": "Developer Tools",
+    "capabilities": ["MCP", "Hooks"],
+    "websiteURL": "https://github.com/naoto256/ssh-mcp"
+  }
+}

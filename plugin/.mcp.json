@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "ssh": {
+      "type": "stdio",
+      "command": "ssh-mcp",
+      "args": ["serve"],
+      "env": {},
+      "timeout": 900000
+    }
+  }
+}

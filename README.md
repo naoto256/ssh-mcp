@@ -67,7 +67,7 @@ cp target/release/ssh-mcp ~/.local/bin/ssh-mcp
 
 ## Setup
 
-Three things need wiring (macOS or Linux with Claude Code). Windows is not
+Four things need wiring (macOS or Linux with Claude Code). Windows is not
 currently supported **as a host for the daemon** — the daemon uses Unix
 Domain Sockets with peer-uid checks for its control channel; the equivalent
 on Windows would need a Named Pipe transport that has not been ported yet.
@@ -186,7 +186,37 @@ If the daemon cannot find the SSH agent, uncomment one of the
 `systemctl --user restart ssh-mcp-daemon`. Logs are in
 `journalctl --user -u ssh-mcp-daemon`.
 
-### 3. Claude Code
+### 3. Plugin install (Claude Code / Codex)
+
+The in-tree [`plugin/`](plugin/) directory packages the MCP server definition,
+the `PreToolUse` policy hook, and Claude Code settings defaults for both
+Claude Code and Codex. The plugin keeps the MCP server definition shared in
+`plugin/.mcp.json` and resolves the `ssh-mcp` binary through `PATH` by default.
+Set `SSH_MCP_BIN` if your host runtime needs an absolute binary path.
+
+Claude Code:
+
+```text
+/plugin marketplace add naoto256/ssh-mcp
+/plugin install ssh-mcp@naoto256-ssh-mcp
+```
+
+Codex:
+
+```sh
+codex plugin marketplace add /absolute/path/to/ssh-mcp
+codex plugin add ssh-mcp@naoto256-ssh-mcp
+```
+
+See [`plugin/README.md`](plugin/README.md) for local-checkout installation,
+Codex marketplace details, and migration notes from manual host configuration.
+After installing, review and trust the bundled hook in the host runtime before
+removing your manual `ssh` MCP server or hook entries.
+
+### 4. Manual Claude Code configuration
+
+If you are not using the plugin, register the MCP server and wire the policy
+hook by hand.
 
 Two parts: register the MCP server, then wire the policy hook.
 
