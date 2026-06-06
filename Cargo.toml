@@ -1,6 +1,6 @@
 [package]
 name = "ssh-mcp"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Policy-gated SSH execution MCP server for Claude Code"
@@ -11,8 +11,8 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
-# Formatting-preserving TOML DOM, used by `propose_host` to append entries
-# to `ssh-hosts.toml` without rewriting the user's existing layout.
+# Formatting-preserving TOML DOM, used by `propose_host` and ephemeral-host
+# GC to update the daemon-owned TOML without disturbing user-authored config.
 toml_edit = "0.23"
 serde_json = "1.0.150"
 rand = "0.9"

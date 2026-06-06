@@ -8,3 +8,4 @@ _*.md
 *.key
 *.p12
 *.db
+*.ephem.toml
