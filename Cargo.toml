@@ -42,3 +42,16 @@ encoding_rs = "0.8"
 
 [profile.release]
 strip = true
+
+[package.metadata.deb]
+maintainer = "Naoto Morishima"
+depends = "$auto, systemd"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/ssh-mcp", "usr/bin/ssh-mcp", "755"],
+    ["README.md", "usr/share/doc/ssh-mcp/README.md", "644"],
+    ["LICENSE-APACHE", "usr/share/doc/ssh-mcp/LICENSE-APACHE", "644"],
+    ["LICENSE-MIT", "usr/share/doc/ssh-mcp/LICENSE-MIT", "644"],
+    ["dist/deb/systemd/ssh-mcp.service", "usr/lib/systemd/user/ssh-mcp.service", "644"],
+]
