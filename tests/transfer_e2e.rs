@@ -3,7 +3,7 @@
 //! Ignored by default: CI has no host to reach. Run locally with the target
 //! supplied through the environment so no real host detail is committed:
 //!
-//!   SSH_MCP_TEST_HOST=<ip> SSH_MCP_TEST_USER=<user> \
+//!   HEKATESSH_TEST_HOST=<ip> HEKATESSH_TEST_USER=<user> \
 //!     cargo test --test transfer_e2e -- --ignored
 //!
 //! The host must already be in `~/.ssh/known_hosts` and the SSH agent must
@@ -19,10 +19,10 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 /// A one-host inventory built from the environment, so the real host's
 /// address and user never appear in committed source.
 fn test_config() -> HostsConfig {
-    let host = std::env::var("SSH_MCP_TEST_HOST").expect("set SSH_MCP_TEST_HOST");
+    let host = std::env::var("HEKATESSH_TEST_HOST").expect("set HEKATESSH_TEST_HOST");
     let mut toml =
         format!("[hosts.target]\nhostname = \"{host}\"\npurpose = \"e2e\"\npolicy = [\"free\"]\n");
-    if let Ok(user) = std::env::var("SSH_MCP_TEST_USER") {
+    if let Ok(user) = std::env::var("HEKATESSH_TEST_USER") {
         toml.push_str(&format!("user = \"{user}\"\n"));
     }
     HostsConfig::parse(&toml).expect("generated test config should parse")
