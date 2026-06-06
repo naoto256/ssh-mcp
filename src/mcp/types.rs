@@ -303,8 +303,8 @@ pub struct ProposeHostResult {
     /// The alias the server assigned (e.g. `"tmp-a3f2k9"`). Will become
     /// addressable from `exec` once the user removes `disabled = true`.
     pub alias: String,
-    /// Absolute path of the TOML file the entry was appended to. Tell the
-    /// user to open this and flip `disabled`.
+    /// Absolute path of the ephemeral TOML file the entry was appended to.
+    /// Tell the user to open this and flip `disabled`.
     pub config_path: String,
     /// The exact block that was appended, including the activation comment.
     /// Lets the model echo it back to the user verbatim.
