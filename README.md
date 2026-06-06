@@ -84,6 +84,14 @@ CP932 on Japanese installs) before handing text back to the caller.
 
 Describe permanent hosts in `~/.ssh/ssh-mcp.toml`:
 
+```sh
+ssh-mcp import > ~/.ssh/ssh-mcp.toml
+```
+
+The import command reads `~/.ssh/config`, asks OpenSSH to resolve each concrete
+host alias, and prints a reviewable `ssh-mcp.toml` skeleton. It never writes the
+file in place.
+
 ```toml
 # Each exec has a time limit, 600s by default. Override globally here, or
 # per host with an exec_timeout_secs key under [hosts.<alias>].
