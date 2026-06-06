@@ -41,7 +41,7 @@ that must be an alias from `list_hosts`.
 | `put` | Symmetric: uploads a local file or directory. If the remote destination is an existing directory the entry lands inside; otherwise it replaces. Returns wire bytes (same meaning as `get`). |
 | `sync_get` / `sync_put` | Mirror a directory in either direction. Both paths are treated as roots: files in the destination that are absent from the source are deleted; files matching by sha-256 are skipped. Returns per-op counts and the wire bytes for the files that actually moved. |
 | `trace` | Re-inspects the full detail of a recent tool call from a per-session ring buffer (depth 5, 10 MiB per entry). `op` is the same pipeline shape as `exec`, but required (at least one step — pass `[{full: true}]` for the whole body). Accepts a `stream` selector (`stdout` / `stderr` / `both`, default `both`) for exec entries. `grep` matches the bare line text, so a pattern that worked on the original `exec` result keeps working. Transfer entries come back as `<verb> <path>` lines. |
-| `propose_host` | Appends a *pending* host entry to `ssh-hosts.toml` for a freshly spun-up cloud VM (or similar). The entry is written with `disabled = true` plus an `expires_at` (required, RFC 3339, at most 30 days out) and a pinned `host_key` (required, OpenSSH single-line public key); **the user has to open the TOML and remove the `disabled` line for the host to become usable** — that hand edit is the trust gate. The server picks the alias (`tmp-` + 6 random hex chars) and hard-codes `policy = ["claude"]`; the input supplies `hostname`, `user`, `purpose`, `expires_at`, `host_key`, plus the optional `port`, `tags`, `proxy_jump`. The pinned `host_key` lets the entry skip `~/.ssh/known_hosts` entirely — verification is byte-match against the pin. Returns the alias, the absolute config path, the appended TOML snippet, and a short activation hint to echo to the user. Example: `{"hostname": "13.78.10.5", "user": "azureuser", "purpose": "azure scratch box", "expires_at": "2026-05-27T19:30:00+09:00", "host_key": "ssh-ed25519 AAAAC3Nz... host@vm"}`. |
+| `propose_host` | Appends a *pending* host entry to the daemon-owned ephemeral inventory next to `ssh-mcp.toml` (for the default config, `~/.ssh/ssh-mcp.ephem.toml`) for a freshly spun-up cloud VM or similar. The entry is written with `disabled = true` plus an `expires_at` (required, RFC 3339, at most 30 days out) and a pinned `host_key` (required, OpenSSH single-line public key); **the user has to open the TOML and remove the `disabled` line for the host to become usable** — that hand edit is the trust gate. The server picks the alias (`tmp-` + 6 random hex chars) and hard-codes `policy = ["claude"]`; the input supplies `hostname`, `user`, `purpose`, `expires_at`, `host_key`, plus the optional `port`, `tags`, `proxy_jump`. The pinned `host_key` lets the entry skip `~/.ssh/known_hosts` entirely — verification is byte-match against the pin. Returns the alias, the absolute ephemeral config path, the appended TOML snippet, and a short activation hint to echo to the user. Example: `{"hostname": "13.78.10.5", "user": "azureuser", "purpose": "azure scratch box", "expires_at": "2026-05-27T19:30:00+09:00", "host_key": "ssh-ed25519 AAAAC3Nz... host@vm"}`. |
 | `list_agent_keys` | Lists the public keys held by the SSH agent (`$SSH_AUTH_SOCK`). Equivalent to `ssh-add -L`. Use it to tell the user which key to drop into a freshly provisioned host's `authorized_keys` (paste the `public_key` string), or to diagnose "SSH agent authentication failed" exec failures. Returns `type` / `comment` / `fingerprint` (SHA-256) / full OpenSSH `public_key` per identity. No arguments. Certificates are not included. |
 
 The `op` pipeline on `exec` and `trace` exists so scoping happens through the
@@ -82,7 +82,7 @@ CP932 on Japanese installs) before handing text back to the caller.
 
 ### 1. The host inventory
 
-Describe your hosts in `~/.ssh/ssh-mcp.toml`:
+Describe permanent hosts in `~/.ssh/ssh-mcp.toml`:
 
 ```toml
 # Each exec has a time limit, 600s by default. Override globally here, or
@@ -127,7 +127,7 @@ Three optional fields on every host entry control ephemerality and host-key trus
 
 | Field | Effect |
 |---|---|
-| `expires_at` | RFC 3339 datetime (e.g. `2026-05-27T19:30:00+09:00`). When the daemon next loads the file, any host whose `expires_at` has passed is removed from the in-memory inventory **and from the TOML file on disk** (formatting and comments on surviving entries are preserved). Add it by hand to anything you want auto-cleaned, or let `propose_host` set it. |
+| `expires_at` | RFC 3339 datetime (e.g. `2026-05-27T19:30:00+09:00`). When the daemon next loads the inventory, any host whose `expires_at` has passed is removed from the in-memory inventory. Expired entries in the daemon-owned ephemeral file are also removed from that file on disk; the main `ssh-mcp.toml` is treated as read-only daemon input. |
 | `disabled` | Boolean, default `false`. When `true` the entry is parsed but skipped — it does not appear in `list_hosts` and `exec` (and friends) fail with "unknown host". This is the activation gate `propose_host` uses; flip it to `false` (or delete the line) by hand to enable a pending entry. |
 | `host_key` | Pinned host public key in OpenSSH single-line format (e.g. `ssh-ed25519 AAAA... comment`). When set, the daemon verifies the live server key against this value on connect and **skips `~/.ssh/known_hosts` entirely** — a clean fit for ephemeral cloud VMs whose key the user already harvested out-of-band (cloud console, `ssh-keyscan`, etc.). `propose_host` writes this automatically; you can also pin a permanent host by hand. |
 
@@ -148,7 +148,7 @@ strictest of all the referenced rulesets wins.
 
 Each host with no pinned `host_key` must already be in `~/.ssh/known_hosts`
 (entries that set `host_key` verify against the pin and skip `known_hosts`
-— `propose_host` takes that path). Either way your SSH agent must hold a
+— `propose_host` writes that entry to the sibling ephemeral file). Either way your SSH agent must hold a
 key the host accepts. `proxy_jump` is supported: list jump-host aliases
 nearest-hop first.
 
@@ -229,8 +229,9 @@ Then add the PreToolUse hook to `~/.claude/settings.json`:
 - Keep `Bash(ssh *)` in `permissions.ask` so raw `ssh` from the `Bash` tool is
   not a bypass.
 - Protect the trust root by denying edits to it: add `Edit(~/.ssh/ssh-mcp.toml)`,
-  `Edit(~/.ssh/ssh-mcp/**)`, `Edit(~/.claude/settings.json)`, `Edit(~/.claude.json)`,
-  and the path of the `ssh-mcp` binary to `permissions.ask` (or `deny`).
+  `Edit(~/.ssh/ssh-mcp.ephem.toml)`, `Edit(~/.ssh/ssh-mcp/**)`,
+  `Edit(~/.claude/settings.json)`, `Edit(~/.claude.json)`, and the path of the
+  `ssh-mcp` binary to `permissions.ask` (or `deny`).
 
 ## Troubleshooting
 

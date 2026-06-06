@@ -1,11 +1,13 @@
 //! The `ssh-mcp.toml` schema and loader.
 //!
 //! This file is the single source of truth for connection details, host
-//! purpose, and per-host policy. The daemon is its only reader.
+//! purpose, and per-host policy. The main config is user-authored and read
+//! only; the daemon-owned ephemeral sibling is the only inventory file this
+//! process rewrites.
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use jiff::Timestamp;
@@ -16,6 +18,19 @@ use serde::{Deserialize, Deserializer};
 /// Generous enough to cover most builds; a host that needs longer should set
 /// its own `exec_timeout_secs`, or run the work detached.
 pub const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 600;
+
+/// The daemon-owned ephemeral inventory next to the main config.
+///
+/// `~/.ssh/ssh-mcp.toml` becomes `~/.ssh/ssh-mcp.ephem.toml`; tests and
+/// custom config paths follow the same basename rule.
+pub fn ephemeral_file_for(main_path: &Path) -> PathBuf {
+    let stem = main_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("ssh-mcp");
+    let name = format!("{stem}.ephem.toml");
+    main_path.with_file_name(name)
+}
 
 /// The three permission lists shared by the `def` and `claude` gates.
 ///
@@ -169,9 +184,10 @@ pub struct HostEntry {
     /// Inline rules consumed by the `def` gate, from `[hosts.<alias>.def]`.
     pub def: Option<Permissions>,
     /// RFC 3339 datetime at which this entry stops being usable. When in the
-    /// past, the entry is GC'd from the TOML file at the next load. When in
-    /// the future the entry is treated as ephemeral but otherwise behaves
-    /// normally. Absent means "no expiry".
+    /// past, the entry is dropped from the in-memory inventory at the next
+    /// load; expired entries that came from the daemon-owned ephemeral file
+    /// are also GC'd from that file. The main config remains read-only daemon
+    /// input. Absent means "no expiry".
     ///
     /// Set automatically by `propose_host`; users may also add it by hand to
     /// any entry they want auto-cleaned.
@@ -205,7 +221,7 @@ pub struct Defaults {
     pub exclude: Vec<String>,
 }
 
-/// The parsed `ssh-hosts.toml`.
+/// The parsed host inventory.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct HostsConfig {
     #[serde(default)]
@@ -231,25 +247,47 @@ impl HostsConfig {
         self.def.get(name)
     }
 
-    /// Read and parse the config from disk.
+    /// Read and parse the main config plus the daemon-owned ephemeral file.
     ///
-    /// The file is read fresh on every call: it is small, and dynamic reload
-    /// avoids the complexity of cache invalidation. Two extra passes run
-    /// before the result is returned:
+    /// The main file is read fresh on every call: it is small, and dynamic
+    /// reload avoids the complexity of cache invalidation. The ephemeral
+    /// sibling (`*.ephem.toml`) is optional and may contain `[hosts.*]`
+    /// tables only; the daemon is the only writer for that file. The two
+    /// texts are concatenated before parsing, so duplicate host aliases are
+    /// rejected by TOML itself rather than by a merge rule.
+    ///
+    /// Two extra passes run before the result is returned:
     ///
     /// 1. **GC of expired entries.** Any host whose `expires_at` is in the
-    ///    past is removed both from the in-memory config and from the TOML
-    ///    file on disk. Formatting and comments of the surviving entries are
-    ///    preserved via `toml_edit`. A GC pass that fails to write back is
-    ///    not fatal — the in-memory drop still happens.
+    ///    past is removed from the in-memory config. The daemon writes back
+    ///    only to the ephemeral file, preserving the user's main config as
+    ///    read-only daemon input.
     /// 2. **Disabled-entry filtering.** Entries with `disabled = true` are
     ///    parsed (so the GC can still expire them) but dropped from the
     ///    returned `hosts` map so they cannot be addressed by `exec` or shown
     ///    by `list_hosts`.
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
+        let main_text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let mut config = Self::parse(&text)?;
+        let ephem_path = ephemeral_file_for(path);
+        let ephem_text = match std::fs::read_to_string(&ephem_path) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to read {}", ephem_path.display()));
+            }
+        };
+        if let Some(text) = &ephem_text {
+            validate_ephemeral_text(&ephem_path, text)?;
+        }
+        let combined = combined_config_text(&main_text, ephem_text.as_deref());
+        let mut config = Self::parse(&combined).with_context(|| {
+            format!(
+                "failed to parse combined host inventory from {} and {}; check for duplicate host aliases across the main and ephemeral files",
+                path.display(),
+                ephem_path.display()
+            )
+        })?;
         let now = Timestamp::now();
         let expired: Vec<String> = config
             .hosts
@@ -263,15 +301,16 @@ impl HostsConfig {
             for alias in &expired {
                 config.hosts.remove(alias);
             }
-            // Best-effort: if rewriting the file fails (read-only mount, race
-            // with a hand edit), leave the file alone and just rely on
-            // in-memory removal for this load. The entry will re-expire on
-            // the next load attempt.
-            if let Err(err) = remove_entries_from_toml(path, &text, &expired) {
-                eprintln!(
-                    "ssh-mcp: warning: failed to remove expired hosts from {}: {err:#}",
-                    path.display()
-                );
+            if let Some(text) = &ephem_text {
+                // Best-effort: if rewriting the ephemeral file fails, leave
+                // it alone and rely on in-memory removal for this load. The
+                // entry will re-expire on the next load attempt.
+                if let Err(err) = remove_entries_from_toml(&ephem_path, text, &expired) {
+                    eprintln!(
+                        "ssh-mcp: warning: failed to remove expired hosts from {}: {err:#}",
+                        ephem_path.display()
+                    );
+                }
             }
         }
         config.hosts.retain(|_, entry| !entry.disabled);
@@ -290,6 +329,37 @@ impl HostsConfig {
             .or(self.defaults.exec_timeout_secs)
             .unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS)
     }
+}
+
+fn combined_config_text(main_text: &str, ephem_text: Option<&str>) -> String {
+    let Some(ephem_text) = ephem_text else {
+        return main_text.to_string();
+    };
+    let mut out = String::with_capacity(main_text.len() + ephem_text.len() + 2);
+    out.push_str(main_text);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(ephem_text);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn validate_ephemeral_text(path: &Path, text: &str) -> Result<()> {
+    let doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    for (key, _) in doc.iter() {
+        if key != "hosts" {
+            anyhow::bail!(
+                "{} may contain only [hosts.*] tables; found top-level [{key}]",
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Accept `expires_at` as either a native TOML datetime (the common form,
@@ -542,17 +612,18 @@ mod tests {
 
     #[test]
     fn load_skips_disabled_and_gcs_expired() {
-        // Build a config with three entries: one active, one disabled (must
-        // be hidden from the loaded map but kept in the file), one already
-        // expired (must be removed from both the map and the file). Round-
-        // trip through disk so GC actually runs.
+        // Main config stays read-only; disabled and expired ephemeral entries
+        // are parsed from the sibling file, hidden from the loaded map, and
+        // expired entries are GC'd from the ephemeral file only.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ssh-hosts.toml");
-        let body = r#"
+        let path = dir.path().join("ssh-mcp.toml");
+        let main_body = r#"
 [hosts.live]
 hostname = "10.0.0.1"
 purpose = "live"
 policy = ["free"]
+"#;
+        let ephem_body = r#"
 
 [hosts.tmp-pending]
 hostname = "10.0.0.2"
@@ -567,17 +638,109 @@ purpose = "stale"
 policy = ["claude"]
 expires_at = 2000-01-01T00:00:00Z
 "#;
-        std::fs::write(&path, body).unwrap();
+        std::fs::write(&path, main_body).unwrap();
+        let ephem_path = ephemeral_file_for(&path);
+        std::fs::write(&ephem_path, ephem_body).unwrap();
         let config = HostsConfig::load(&path).unwrap();
         // Live is reachable; disabled and stale are not.
         assert!(config.host("live").is_some());
         assert!(config.host("tmp-pending").is_none());
         assert!(config.host("tmp-stale").is_none());
-        // On disk: live and tmp-pending remain, tmp-stale was GC'd out.
-        let after = std::fs::read_to_string(&path).unwrap();
-        assert!(after.contains("[hosts.live]"));
-        assert!(after.contains("[hosts.tmp-pending]"));
-        assert!(!after.contains("[hosts.tmp-stale]"));
+        // On disk: main is untouched; tmp-pending remains in ephem, tmp-stale
+        // was GC'd out of ephem.
+        let main_after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(main_after, main_body);
+        let ephem_after = std::fs::read_to_string(&ephem_path).unwrap();
+        assert!(ephem_after.contains("[hosts.tmp-pending]"));
+        assert!(!ephem_after.contains("[hosts.tmp-stale]"));
+    }
+
+    #[test]
+    fn load_merges_optional_ephemeral_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ssh-mcp.toml");
+        std::fs::write(
+            &path,
+            r#"
+[defaults]
+exec_timeout_secs = 42
+
+[hosts.main]
+hostname = "10.0.0.1"
+purpose = "main"
+policy = ["free"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            ephemeral_file_for(&path),
+            r#"
+[hosts.tmp]
+hostname = "10.0.0.2"
+purpose = "tmp"
+policy = ["claude"]
+"#,
+        )
+        .unwrap();
+
+        let config = HostsConfig::load(&path).unwrap();
+        assert_eq!(config.defaults.exec_timeout_secs, Some(42));
+        assert!(config.host("main").is_some());
+        assert!(config.host("tmp").is_some());
+    }
+
+    #[test]
+    fn load_accepts_missing_ephemeral_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ssh-mcp.toml");
+        std::fs::write(
+            &path,
+            r#"
+[hosts.main]
+hostname = "10.0.0.1"
+purpose = "main"
+policy = ["free"]
+"#,
+        )
+        .unwrap();
+
+        let config = HostsConfig::load(&path).unwrap();
+        assert!(config.host("main").is_some());
+    }
+
+    #[test]
+    fn load_rejects_duplicate_alias_across_main_and_ephemeral() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ssh-mcp.toml");
+        let host = r#"
+[hosts.same]
+hostname = "10.0.0.1"
+purpose = "same"
+policy = ["free"]
+"#;
+        std::fs::write(&path, host).unwrap();
+        std::fs::write(ephemeral_file_for(&path), host).unwrap();
+
+        let err = HostsConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("combined host inventory"));
+    }
+
+    #[test]
+    fn load_rejects_top_level_defaults_in_ephemeral_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ssh-mcp.toml");
+        std::fs::write(&path, "").unwrap();
+        std::fs::write(
+            ephemeral_file_for(&path),
+            r#"
+[defaults]
+exec_timeout_secs = 5
+"#,
+        )
+        .unwrap();
+
+        let err = HostsConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("may contain only [hosts.*] tables"));
     }
 
     #[test]

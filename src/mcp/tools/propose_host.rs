@@ -1,4 +1,4 @@
-//! `propose_host` body — write a pending host entry to `ssh-hosts.toml`.
+//! `propose_host` body — write a pending host entry to the ephemeral TOML.
 //!
 //! The tool's whole reason to exist is to let Claude *propose* an ephemeral
 //! host (typically a freshly spun-up cloud VM) without giving the model the
@@ -24,7 +24,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use russh::keys::ssh_key;
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
-use crate::config::HostsConfig;
+use crate::config::{HostsConfig, ephemeral_file_for};
 use crate::mcp::SshMcpServer;
 use crate::mcp::types::{ProposeHostParams, ProposeHostResult};
 
@@ -43,16 +43,17 @@ pub(in crate::mcp) async fn handle(
 ) -> Result<Json<ProposeHostResult>, String> {
     let params = params.0;
     let plan = validate(&params, &server.config_path)?;
-    let snippet = write_entry(&server.config_path, &plan)?;
+    let ephem_path = ephemeral_file_for(&server.config_path);
+    let snippet = write_entry(&ephem_path, &plan)?;
     Ok(Json(ProposeHostResult {
         status: "proposed".into(),
         alias: plan.alias.clone(),
-        config_path: server.config_path.display().to_string(),
+        config_path: ephem_path.display().to_string(),
         snippet,
         activate_hint: format!(
             "Remove `disabled = true` from [hosts.{}] in {} (or set it to false) to enable.",
             plan.alias,
-            server.config_path.display()
+            ephem_path.display()
         ),
         expires_at: plan.expires_at.to_string(),
     }))
@@ -175,7 +176,7 @@ fn validate(params: &ProposeHostParams, config_path: &Path) -> Result<Plan, Stri
 /// disabled/expired entry is still a name that lives in the file and would
 /// produce a duplicate-table error if reused.
 fn pick_alias(config_path: &Path) -> Result<String, String> {
-    let existing = existing_aliases(config_path)?;
+    let existing = existing_aliases_for_inventory(config_path)?;
     let mut rng = rand::rng();
     for _ in 0..ALIAS_RETRIES {
         let n: u32 = rng.random_range(0..0x0100_0000);
@@ -185,6 +186,14 @@ fn pick_alias(config_path: &Path) -> Result<String, String> {
         }
     }
     Err("could not draw a unique alias after several attempts".into())
+}
+
+fn existing_aliases_for_inventory(
+    config_path: &Path,
+) -> Result<std::collections::HashSet<String>, String> {
+    let mut existing = existing_aliases(config_path)?;
+    existing.extend(existing_aliases(&ephemeral_file_for(config_path))?);
+    Ok(existing)
 }
 
 /// Aliases currently present under `[hosts.*]`. Read via `toml_edit` so a
@@ -208,17 +217,17 @@ fn existing_aliases(config_path: &Path) -> Result<std::collections::HashSet<Stri
     Ok(out)
 }
 
-/// Append the validated `Plan` to `config_path`'s TOML. Returns the textual
+/// Append the validated `Plan` to the ephemeral TOML. Returns the textual
 /// snippet that was added (for echoing in the result).
-fn write_entry(config_path: &Path, plan: &Plan) -> Result<String, String> {
-    let text = match std::fs::read_to_string(config_path) {
+fn write_entry(ephem_path: &Path, plan: &Plan) -> Result<String, String> {
+    let text = match std::fs::read_to_string(ephem_path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("reading {}: {e}", config_path.display())),
+        Err(e) => return Err(format!("reading {}: {e}", ephem_path.display())),
     };
     let mut doc: DocumentMut = text
         .parse()
-        .map_err(|e| format!("parsing {}: {e}", config_path.display()))?;
+        .map_err(|e| format!("parsing {}: {e}", ephem_path.display()))?;
 
     // Build the new table.
     let mut table = Table::new();
@@ -299,14 +308,14 @@ fn write_entry(config_path: &Path, plan: &Plan) -> Result<String, String> {
     // freshly serialized doc.
     let snippet = extract_snippet(&new_text, &plan.alias).unwrap_or_default();
 
-    let dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let dir = ephem_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)
         .map_err(|e| format!("creating temp file in {}: {e}", dir.display()))?;
     tmp.write_all(new_text.as_bytes())
         .map_err(|e| format!("writing config: {e}"))?;
-    tmp.persist(config_path)
-        .map_err(|e| format!("replacing {}: {e}", config_path.display()))?;
+    tmp.persist(ephem_path)
+        .map_err(|e| format!("replacing {}: {e}", ephem_path.display()))?;
     Ok(snippet)
 }
 
@@ -443,19 +452,19 @@ policy = ["free"]
         let path = fresh_config(dir.path(), original);
         let p = params("13.0.0.1", "ubuntu", "azure scratch", &future_iso(1));
         let plan = validate(&p, &path).unwrap();
-        let snippet = write_entry(&path, &plan).unwrap();
+        let ephem_path = ephemeral_file_for(&path);
+        let snippet = write_entry(&ephem_path, &plan).unwrap();
 
-        let after = std::fs::read_to_string(&path).unwrap();
-        // The original comment and the live entry's inline comment must
-        // still be there.
-        assert!(after.contains("# user's notes — must survive"));
-        assert!(after.contains(r#"purpose = "main box"  # inline comment"#));
-        // The new entry must be present.
+        // The main file is daemon read-only and must not change.
+        let main_after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(main_after, original);
+        // The new entry must be present in the ephemeral file.
+        let ephem_after = std::fs::read_to_string(&ephem_path).unwrap();
         let header = format!("[hosts.{}]", plan.alias);
-        assert!(after.contains(&header));
-        assert!(after.contains("disabled = true"));
-        assert!(after.contains("# remove this line"));
-        assert!(after.contains(r#"policy = ["claude"]"#));
+        assert!(ephem_after.contains(&header));
+        assert!(ephem_after.contains("disabled = true"));
+        assert!(ephem_after.contains("# remove this line"));
+        assert!(ephem_after.contains(r#"policy = ["claude"]"#));
         // Snippet must echo the new block.
         assert!(snippet.contains(&header));
         assert!(snippet.contains("disabled = true"));
@@ -486,7 +495,7 @@ policy = ["free"]
         let p = params("10.0.0.1", "ubuntu", "scratch", &future_iso(1));
         let plan = validate(&p, &path).unwrap();
         assert_eq!(plan.host_key, VALID_HOST_KEY);
-        let snippet = write_entry(&path, &plan).unwrap();
+        let snippet = write_entry(&ephemeral_file_for(&path), &plan).unwrap();
         assert!(snippet.contains("host_key = "));
         assert!(snippet.contains(VALID_HOST_KEY));
         let hk_pos = snippet.find("host_key").unwrap();
@@ -512,6 +521,30 @@ disabled = true
 "#,
         );
         // Run many draws; none should match the pre-seeded alias.
+        for _ in 0..50 {
+            let a = pick_alias(&path).unwrap();
+            assert_ne!(a, "tmp-000000");
+            assert!(a.starts_with("tmp-"));
+            assert_eq!(a.len(), 10);
+        }
+    }
+
+    #[test]
+    fn alias_collision_checks_ephemeral_file_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fresh_config(dir.path(), "");
+        std::fs::write(
+            ephemeral_file_for(&path),
+            r#"
+[hosts.tmp-000000]
+hostname = "1.1.1.1"
+purpose = "decoy"
+policy = ["claude"]
+disabled = true
+"#,
+        )
+        .unwrap();
+
         for _ in 0..50 {
             let a = pick_alias(&path).unwrap();
             assert_ne!(a, "tmp-000000");
