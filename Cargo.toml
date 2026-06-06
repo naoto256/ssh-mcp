@@ -3,8 +3,12 @@ name = "ssh-mcp"
 version = "0.2.5"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Policy-gated SSH execution MCP server for Claude Code"
+description = "Policy-gated SSH execution MCP server for Claude Code and Codex"
 repository = "https://github.com/naoto256/ssh-mcp"
+homepage = "https://github.com/naoto256/ssh-mcp"
+readme = "README.md"
+keywords = ["mcp", "ssh", "claude-code", "codex", "automation"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
