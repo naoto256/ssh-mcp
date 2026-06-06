@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-06
+
+### Added
+
+- Add crates.io publish metadata, including package description, homepage, README, keywords, and categories.
+- Add tag-driven release CI that builds macOS arm64/x86_64 and Linux x86_64 binary archives, applies ad-hoc codesigning on macOS, and uploads `tar.gz` archives with `sha256` files to GitHub Releases.
+- Add Debian package metadata, a systemd user unit, and CI packaging through `cargo-deb` with `.deb` release uploads.
+- Add Homebrew tap setup notes for `naoto256/homebrew-ssh-mcp` and a post-release `sha256` bump script under `dist/brew/`.
+
 ## [0.2.5] - 2026-06-06
 
 ### Added
@@ -76,6 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add setup documentation, LaunchAgent template, Linux notes, public design documentation, end-to-end tests, and supply-chain audit configuration.
 - Add LICENSE files, CONTRIBUTING.md, README badges, CI action pin-audit metadata, and audit-log file mode hardening.
 
+[0.3.0]: https://github.com/naoto256/ssh-mcp/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/naoto256/ssh-mcp/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/naoto256/ssh-mcp/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/naoto256/ssh-mcp/compare/v0.2.2...v0.2.3
