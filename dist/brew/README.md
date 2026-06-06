@@ -12,8 +12,7 @@ After publishing `v0.3.0`, create `Formula/ssh-mcp.rb` in
 `naoto256/homebrew-ssh-mcp`. The formula should:
 
 - install the matching release asset for each supported target:
-  `aarch64-apple-darwin`, `x86_64-apple-darwin`, and
-  `x86_64-unknown-linux-gnu`
+  `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`
 - set `version "0.3.0"`
 - install the `ssh-mcp` binary into `bin`
 - define a `service do` block that runs `ssh-mcp daemon`
@@ -38,10 +37,6 @@ class SshMcp < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/naoto256/ssh-mcp/releases/download/v#{version}/ssh-mcp-v#{version}-aarch64-apple-darwin.tar.gz"
-      # Fill after release.
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-    else
-      url "https://github.com/naoto256/ssh-mcp/releases/download/v#{version}/ssh-mcp-v#{version}-x86_64-apple-darwin.tar.gz"
       # Fill after release.
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
@@ -111,7 +106,6 @@ SSH_MCP_BREW_DRY_RUN=1 dist/brew/scripts/bump-brew-formula.sh v0.3.0 /path/to/ho
 Expected release asset names:
 
 - `ssh-mcp-v0.3.0-aarch64-apple-darwin.tar.gz`
-- `ssh-mcp-v0.3.0-x86_64-apple-darwin.tar.gz`
 - `ssh-mcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz`
 
 ## User install flow

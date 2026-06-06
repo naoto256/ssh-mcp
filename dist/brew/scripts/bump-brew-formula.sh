@@ -34,7 +34,6 @@ dry_run="${SSH_MCP_BREW_DRY_RUN:-0}"
 
 assets=(
   "aarch64-apple-darwin"
-  "x86_64-apple-darwin"
   "x86_64-unknown-linux-gnu"
 )
 
