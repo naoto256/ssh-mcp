@@ -12,13 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add crates.io publish metadata, including package description, homepage, README, keywords, and categories.
 - Add tag-driven release CI that builds macOS arm64/x86_64 and Linux x86_64 binary archives, applies ad-hoc codesigning on macOS, and uploads `tar.gz` archives with `sha256` files to GitHub Releases.
 - Add Debian package metadata, a systemd user unit, and CI packaging through `cargo-deb` with `.deb` release uploads.
-- Add Homebrew tap setup notes for `naoto256/homebrew-ssh-mcp` and a post-release `sha256` bump script under `dist/brew/`.
+- Add Homebrew tap setup notes for `naoto256/homebrew-hekatessh` and a post-release `sha256` bump script under `dist/brew/`.
 
 ## [0.2.5] - 2026-06-06
 
 ### Added
 
-- Add the `ssh-mcp import` CLI subcommand for bootstrapping `ssh-mcp.toml` from `~/.ssh/config`.
+- Add the `hekatessh import` CLI subcommand for bootstrapping `hekatessh.toml` from `~/.ssh/config`.
 
 ### Removed
 
@@ -28,16 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Add bundled Claude Code and Codex plugin manifests for installing `ssh-mcp` as a plugin.
+- Add bundled Claude Code and Codex plugin manifests for installing `hekatessh` as a plugin.
 - Add a shared plugin MCP server definition and `PreToolUse` policy hook wrapper for host-affecting SSH tools.
-- Add plugin settings defaults that protect `~/.ssh/ssh-mcp.toml`, `~/.ssh/ssh-mcp.ephem.toml`, and `~/.ssh/ssh-mcp/**` from agent edits.
+- Add plugin settings defaults that protect `~/.ssh/hekatessh.toml`, `~/.ssh/hekatessh.ephem.toml`, and `~/.ssh/hekatessh/**` from agent edits.
 
 ## [0.2.3] - 2026-06-06
 
 ### Added
 
-- Add a daemon-owned ephemeral inventory file (`ssh-mcp.ephem.toml`) for proposed hosts.
-- Keep the main `ssh-mcp.toml` as read-only daemon input while `propose_host` and expired-host GC write only the ephemeral file.
+- Add a daemon-owned ephemeral inventory file (`hekatessh.ephem.toml`) for proposed hosts.
+- Keep the main `hekatessh.toml` as read-only daemon input while `propose_host` and expired-host GC write only the ephemeral file.
 - Reject duplicate host aliases across the main and ephemeral inventories through TOML-level parsing.
 
 ## [0.2.2] - 2026-06-06
@@ -85,11 +85,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add setup documentation, LaunchAgent template, Linux notes, public design documentation, end-to-end tests, and supply-chain audit configuration.
 - Add LICENSE files, CONTRIBUTING.md, README badges, CI action pin-audit metadata, and audit-log file mode hardening.
 
-[0.3.0]: https://github.com/naoto256/ssh-mcp/compare/v0.2.5...v0.3.0
-[0.2.5]: https://github.com/naoto256/ssh-mcp/compare/v0.2.4...v0.2.5
-[0.2.4]: https://github.com/naoto256/ssh-mcp/compare/v0.2.3...v0.2.4
-[0.2.3]: https://github.com/naoto256/ssh-mcp/compare/v0.2.2...v0.2.3
-[0.2.2]: https://github.com/naoto256/ssh-mcp/compare/v0.2.1...v0.2.2
-[0.2.1]: https://github.com/naoto256/ssh-mcp/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/naoto256/ssh-mcp/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/naoto256/ssh-mcp/releases/tag/v0.1.0
+[0.3.0]: https://github.com/naoto256/hekatessh/compare/v0.2.5...v0.3.0
+[0.2.5]: https://github.com/naoto256/hekatessh/compare/v0.2.4...v0.2.5
+[0.2.4]: https://github.com/naoto256/hekatessh/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/naoto256/hekatessh/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/naoto256/hekatessh/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/naoto256/hekatessh/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/naoto256/hekatessh/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/naoto256/hekatessh/releases/tag/v0.1.0

@@ -3,7 +3,7 @@
 
 [advisories]
 ignore = [
-    # See deny.toml for the rationale. ssh-mcp is an SSH client
+    # See deny.toml for the rationale. HekateSSH is an SSH client
     # connecting to operator-trusted hosts; the Marvin Attack requires
     # the SSH peer to observe RSA timing, which is the host we already
     # trust.

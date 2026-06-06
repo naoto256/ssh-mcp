@@ -4,10 +4,10 @@
 use rmcp::Json;
 
 use crate::config::HostsConfig;
-use crate::mcp::SshMcpServer;
+use crate::mcp::HekateSshServer;
 use crate::mcp::types::{HostList, HostSummary};
 
-pub(in crate::mcp) async fn handle(server: &SshMcpServer) -> Result<Json<HostList>, String> {
+pub(in crate::mcp) async fn handle(server: &HekateSshServer) -> Result<Json<HostList>, String> {
     let config = HostsConfig::load(&server.config_path).map_err(|e| format!("{e:#}"))?;
     let mut hosts: Vec<HostSummary> = config
         .hosts

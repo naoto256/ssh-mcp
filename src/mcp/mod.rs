@@ -50,7 +50,7 @@ pub use types::{
 /// `tools::*` can read them directly; nothing outside this module tree
 /// needs the internals.
 #[derive(Clone)]
-pub struct SshMcpServer {
+pub struct HekateSshServer {
     pub(in crate::mcp) pool: Arc<ConnectionPool>,
     pub(in crate::mcp) config_path: PathBuf,
     pub(in crate::mcp) audit: AuditLog,
@@ -59,7 +59,7 @@ pub struct SshMcpServer {
 }
 
 #[tool_router(router = tool_router)]
-impl SshMcpServer {
+impl HekateSshServer {
     /// Build a session that shares the daemon's connection pool and audit log
     /// and owns a fresh trace buffer for its own tool calls.
     pub fn new(pool: Arc<ConnectionPool>, config_path: PathBuf, audit: AuditLog) -> Self {
@@ -149,7 +149,7 @@ impl SshMcpServer {
 
     #[tool(
         name = "propose_host",
-        description = "Append a *pending* host entry to the daemon-owned ephemeral TOML next to the user's ssh-mcp.toml so they can review and activate it.\n\nThe tool exists for the common case where the user has just spun up an Azure / AWS VM and wants Claude to start using it without typing the TOML by hand. **Calling this tool does NOT make the host usable** — the entry is written with `disabled = true` and the user must open the ephemeral file and remove that line (or set it to false) for the daemon to pick the host up on the next call. That hand edit is the trust gate. The main ssh-mcp.toml is read-only daemon input; proposed hosts are written to a sibling such as ~/.ssh/ssh-mcp.ephem.toml.\n\nExamples:\n  {\"hostname\": \"13.78.10.5\", \"user\": \"azureuser\", \"purpose\": \"azure scratch box\",\n   \"expires_at\": \"2026-05-27T19:30:00+09:00\",\n   \"host_key\": \"ssh-ed25519 AAAAC3Nz... host@vm\"}\n      → write [hosts.tmp-XXXXXX] to the ephemeral file with policy=[\"claude\"],\n        disabled=true, the pinned host_key, and expires_at as given; tell the\n        user to flip `disabled`.\n  {\"hostname\": \"10.0.5.7\", \"user\": \"ubuntu\", \"purpose\": \"jump from bastion\",\n   \"expires_at\": \"2026-05-26T09:00:00+09:00\",\n   \"host_key\": \"ssh-ed25519 AAAAC3Nz... host@vm\",\n   \"proxy_jump\": [\"bastion\"], \"tags\": [\"db\"]}\n      → same shape, plus a jump chain and tags.\n\nServer-controlled fields the caller cannot set: `alias` (auto-generated as `tmp-` plus 6 random hex chars), `policy` (hard-coded to `[\"claude\"]` — adjust by hand if a stricter gate is needed), `disabled` (always true on write).\n\nRequired fields: `hostname`, `user`, `purpose`, `expires_at`, `host_key`. `expires_at` must be a RFC 3339 datetime in the future, at most 30 days out — the daemon GCs expired entries from the ephemeral TOML at load time. `host_key` is the OpenSSH-format public key the daemon will pin for this host (verified instead of `~/.ssh/known_hosts`); harvest it from the cloud provider's console or by running `ssh-keyscan` via `exec`. `proxy_jump` aliases must already exist as active hosts."
+        description = "Append a *pending* host entry to the daemon-owned ephemeral TOML next to the user's hekatessh.toml so they can review and activate it.\n\nThe tool exists for the common case where the user has just spun up an Azure / AWS VM and wants the agent to start using it without typing the TOML by hand. **Calling this tool does NOT make the host usable** — the entry is written with `disabled = true` and the user must open the ephemeral file and remove that line (or set it to false) for the daemon to pick the host up on the next call. That hand edit is the trust gate. The main hekatessh.toml is read-only daemon input; proposed hosts are written to a sibling such as ~/.ssh/hekatessh.ephem.toml.\n\nExamples:\n  {\"hostname\": \"13.78.10.5\", \"user\": \"azureuser\", \"purpose\": \"azure scratch box\",\n   \"expires_at\": \"2026-05-27T19:30:00+09:00\",\n   \"host_key\": \"ssh-ed25519 AAAAC3Nz... host@vm\"}\n      → write [hosts.tmp-XXXXXX] to the ephemeral file with policy=[\"claude\"],\n        disabled=true, the pinned host_key, and expires_at as given; tell the\n        user to flip `disabled`.\n  {\"hostname\": \"10.0.5.7\", \"user\": \"ubuntu\", \"purpose\": \"jump from bastion\",\n   \"expires_at\": \"2026-05-26T09:00:00+09:00\",\n   \"host_key\": \"ssh-ed25519 AAAAC3Nz... host@vm\",\n   \"proxy_jump\": [\"bastion\"], \"tags\": [\"db\"]}\n      → same shape, plus a jump chain and tags.\n\nServer-controlled fields the caller cannot set: `alias` (auto-generated as `tmp-` plus 6 random hex chars), `policy` (hard-coded to `[\"claude\"]` — adjust by hand if a stricter gate is needed), `disabled` (always true on write).\n\nRequired fields: `hostname`, `user`, `purpose`, `expires_at`, `host_key`. `expires_at` must be a RFC 3339 datetime in the future, at most 30 days out — the daemon GCs expired entries from the ephemeral TOML at load time. `host_key` is the OpenSSH-format public key the daemon will pin for this host (verified instead of `~/.ssh/known_hosts`); harvest it from the cloud provider's console or by running `ssh-keyscan` via `exec`. `proxy_jump` aliases must already exist as active hosts."
     )]
     async fn propose_host(
         &self,
@@ -168,9 +168,9 @@ impl SshMcpServer {
 }
 
 #[tool_handler(router = self.tool_router)]
-impl ServerHandler for SshMcpServer {
+impl ServerHandler for HekateSshServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("ssh-mcp", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new("hekatessh", env!("CARGO_PKG_VERSION")))
     }
 }

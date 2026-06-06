@@ -9,7 +9,7 @@ use rmcp::handler::server::wrapper::Parameters;
 
 use crate::changeset::ChangeOp;
 use crate::config::HostsConfig;
-use crate::mcp::SshMcpServer;
+use crate::mcp::HekateSshServer;
 use crate::mcp::types::{
     GetParams, PutParams, SyncGetParams, SyncPutParams, SyncResult, TransferResult,
 };
@@ -17,7 +17,7 @@ use crate::pathnorm;
 use crate::trace::{Channel, TraceEntry, TraceLine};
 
 pub(in crate::mcp) async fn handle_get(
-    server: &SshMcpServer,
+    server: &HekateSshServer,
     params: Parameters<GetParams>,
 ) -> Result<Json<TransferResult>, String> {
     let GetParams {
@@ -73,7 +73,7 @@ pub(in crate::mcp) async fn handle_get(
 }
 
 pub(in crate::mcp) async fn handle_put(
-    server: &SshMcpServer,
+    server: &HekateSshServer,
     params: Parameters<PutParams>,
 ) -> Result<Json<TransferResult>, String> {
     let PutParams {
@@ -127,7 +127,7 @@ pub(in crate::mcp) async fn handle_put(
 }
 
 pub(in crate::mcp) async fn handle_sync_get(
-    server: &SshMcpServer,
+    server: &HekateSshServer,
     params: Parameters<SyncGetParams>,
 ) -> Result<Json<SyncResult>, String> {
     let SyncGetParams {
@@ -187,7 +187,7 @@ pub(in crate::mcp) async fn handle_sync_get(
 }
 
 pub(in crate::mcp) async fn handle_sync_put(
-    server: &SshMcpServer,
+    server: &HekateSshServer,
     params: Parameters<SyncPutParams>,
 ) -> Result<Json<SyncResult>, String> {
     let SyncPutParams {
@@ -249,7 +249,7 @@ pub(in crate::mcp) async fn handle_sync_put(
 /// per line; the skipped paths are stashed separately so the model can
 /// opt in to them through `include_skipped`).
 async fn record_transfer_trace(
-    server: &SshMcpServer,
+    server: &HekateSshServer,
     tool: &str,
     host: &str,
     remote: &str,

@@ -1,14 +1,14 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "naoto256-ssh-mcp",
-  "description": "ssh-mcp — policy-gated SSH execution over MCP.",
+  "name": "naoto256-hekatessh",
+  "description": "HekateSSH — policy-gated SSH execution over MCP.",
   "owner": {
     "name": "Naoto Morishima"
   },
   "plugins": [
     {
-      "name": "ssh-mcp",
-      "description": "Wires the ssh-mcp MCP server and its PreToolUse policy hook into Claude Code or Codex.",
+      "name": "hekatessh",
+      "description": "Wires the HekateSSH MCP server and its PreToolUse policy hook into Claude Code or Codex.",
       "author": {
         "name": "Naoto Morishima"
       },

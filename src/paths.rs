@@ -1,7 +1,7 @@
-//! Filesystem locations ssh-mcp uses.
+//! Filesystem locations HekateSSH uses.
 //!
 //! The config sits directly under `~/.ssh`; all daemon runtime state lives in
-//! the `~/.ssh/ssh-mcp/` directory. Keeping everything under `~/.ssh` means an
+//! the `~/.ssh/hekatessh/` directory. Keeping everything under `~/.ssh` means an
 //! existing `Read(~/.ssh/**)` deny rule protects it all.
 
 use std::path::PathBuf;
@@ -14,9 +14,9 @@ fn home() -> Result<PathBuf> {
         .context("HOME is not set")
 }
 
-/// The host inventory and policy file, `~/.ssh/ssh-mcp.toml`.
+/// The host inventory and policy file, `~/.ssh/hekatessh.toml`.
 pub fn config_file() -> Result<PathBuf> {
-    Ok(home()?.join(".ssh").join("ssh-mcp.toml"))
+    Ok(home()?.join(".ssh").join("hekatessh.toml"))
 }
 
 /// The strict host-key file, `~/.ssh/known_hosts`.
@@ -29,22 +29,22 @@ pub fn claude_settings() -> Result<PathBuf> {
     Ok(home()?.join(".claude").join("settings.json"))
 }
 
-/// The daemon's runtime directory, `~/.ssh/ssh-mcp/`.
+/// The daemon's runtime directory, `~/.ssh/hekatessh/`.
 pub fn runtime_dir() -> Result<PathBuf> {
-    Ok(home()?.join(".ssh").join("ssh-mcp"))
+    Ok(home()?.join(".ssh").join("hekatessh"))
 }
 
-/// The MCP transport socket, `~/.ssh/ssh-mcp/mcp.sock`.
+/// The MCP transport socket, `~/.ssh/hekatessh/mcp.sock`.
 pub fn mcp_socket() -> Result<PathBuf> {
     Ok(runtime_dir()?.join("mcp.sock"))
 }
 
-/// The policy control socket, `~/.ssh/ssh-mcp/control.sock`.
+/// The policy control socket, `~/.ssh/hekatessh/control.sock`.
 pub fn control_socket() -> Result<PathBuf> {
     Ok(runtime_dir()?.join("control.sock"))
 }
 
-/// The exec audit log, `~/.ssh/ssh-mcp/audit.jsonl`.
+/// The exec audit log, `~/.ssh/hekatessh/audit.jsonl`.
 pub fn audit_log() -> Result<PathBuf> {
     Ok(runtime_dir()?.join("audit.jsonl"))
 }

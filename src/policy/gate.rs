@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn claude_gate_reads_user_settings() {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("ssh-mcp-test-claude-{}.json", std::process::id()));
+        let path = dir.join(format!("hekatessh-test-claude-{}.json", std::process::id()));
         std::fs::write(
             &path,
             r#"{ "permissions": { "deny": ["Bash(sudo:*)"], "allow": ["Bash(ls:*)"] } }"#,
@@ -403,8 +403,10 @@ mod tests {
 
     #[test]
     fn check_user_path_applies_the_user_settings() {
-        let path =
-            std::env::temp_dir().join(format!("ssh-mcp-test-userpath-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "hekatessh-test-userpath-{}.json",
+            std::process::id()
+        ));
         std::fs::write(
             &path,
             r#"{ "permissions": { "deny": ["Read(//secret/**)"], "allow": ["Edit(//work/**)"] } }"#,

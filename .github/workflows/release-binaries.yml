@@ -28,10 +28,10 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            binary: ssh-mcp
+            binary: hekatessh
           - os: macos-14
             target: aarch64-apple-darwin
-            binary: ssh-mcp
+            binary: hekatessh
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # pin-audit:2026-06-03 de0fac2 | v6.0.2
@@ -52,7 +52,7 @@ jobs:
           set -euo pipefail
 
           version="$(cargo pkgid | sed 's/.*#//')"
-          archive_base="ssh-mcp-v${version}-${{ matrix.target }}"
+          archive_base="hekatessh-v${version}-${{ matrix.target }}"
           staging="dist/${archive_base}"
 
           mkdir -p "${staging}"

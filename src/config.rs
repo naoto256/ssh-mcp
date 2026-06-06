@@ -1,4 +1,4 @@
-//! The `ssh-mcp.toml` schema and loader.
+//! The `hekatessh.toml` schema and loader.
 //!
 //! This file is the single source of truth for connection details, host
 //! purpose, and per-host policy. The main config is user-authored and read
@@ -21,13 +21,13 @@ pub const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 600;
 
 /// The daemon-owned ephemeral inventory next to the main config.
 ///
-/// `~/.ssh/ssh-mcp.toml` becomes `~/.ssh/ssh-mcp.ephem.toml`; tests and
+/// `~/.ssh/hekatessh.toml` becomes `~/.ssh/hekatessh.ephem.toml`; tests and
 /// custom config paths follow the same basename rule.
 pub fn ephemeral_file_for(main_path: &Path) -> PathBuf {
     let stem = main_path
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("ssh-mcp");
+        .unwrap_or("hekatessh");
     let name = format!("{stem}.ephem.toml");
     main_path.with_file_name(name)
 }
@@ -239,7 +239,7 @@ pub struct HostsConfig {
 impl HostsConfig {
     /// Parse a config from a TOML string.
     pub fn parse(toml_str: &str) -> Result<Self> {
-        toml::from_str(toml_str).context("failed to parse ssh-mcp.toml")
+        toml::from_str(toml_str).context("failed to parse hekatessh.toml")
     }
 
     /// Look up a named def ruleset by name.
@@ -307,7 +307,7 @@ impl HostsConfig {
                 // entry will re-expire on the next load attempt.
                 if let Err(err) = remove_entries_from_toml(&ephem_path, text, &expired) {
                     eprintln!(
-                        "ssh-mcp: warning: failed to remove expired hosts from {}: {err:#}",
+                        "hekatessh: warning: failed to remove expired hosts from {}: {err:#}",
                         ephem_path.display()
                     );
                 }
@@ -616,7 +616,7 @@ mod tests {
         // are parsed from the sibling file, hidden from the loaded map, and
         // expired entries are GC'd from the ephemeral file only.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ssh-mcp.toml");
+        let path = dir.path().join("hekatessh.toml");
         let main_body = r#"
 [hosts.live]
 hostname = "10.0.0.1"
@@ -658,7 +658,7 @@ expires_at = 2000-01-01T00:00:00Z
     #[test]
     fn load_merges_optional_ephemeral_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ssh-mcp.toml");
+        let path = dir.path().join("hekatessh.toml");
         std::fs::write(
             &path,
             r#"
@@ -692,7 +692,7 @@ policy = ["claude"]
     #[test]
     fn load_accepts_missing_ephemeral_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ssh-mcp.toml");
+        let path = dir.path().join("hekatessh.toml");
         std::fs::write(
             &path,
             r#"
@@ -711,7 +711,7 @@ policy = ["free"]
     #[test]
     fn load_rejects_duplicate_alias_across_main_and_ephemeral() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ssh-mcp.toml");
+        let path = dir.path().join("hekatessh.toml");
         let host = r#"
 [hosts.same]
 hostname = "10.0.0.1"
@@ -728,7 +728,7 @@ policy = ["free"]
     #[test]
     fn load_rejects_top_level_defaults_in_ephemeral_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ssh-mcp.toml");
+        let path = dir.path().join("hekatessh.toml");
         std::fs::write(&path, "").unwrap();
         std::fs::write(
             ephemeral_file_for(&path),

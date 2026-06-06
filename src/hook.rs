@@ -15,7 +15,7 @@ use tokio::net::UnixStream;
 const FAIL_CLOSED: &str = concat!(
     r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","#,
     r#""permissionDecision":"deny","#,
-    r#""permissionDecisionReason":"ssh-mcp daemon is unreachable; failing closed"}}"#,
+    r#""permissionDecisionReason":"hekatessh daemon is unreachable; failing closed"}}"#,
 );
 
 /// Entry point for the hook proxy.

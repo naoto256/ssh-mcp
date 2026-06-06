@@ -14,7 +14,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::audit::AuditLog;
 use crate::control;
-use crate::mcp::SshMcpServer;
+use crate::mcp::HekateSshServer;
 use crate::paths;
 use crate::policy::Evaluator;
 use crate::ssh::ConnectionPool;
@@ -83,18 +83,18 @@ async fn mcp_loop(
         let stream = match listener.accept().await {
             Ok((stream, _addr)) => stream,
             Err(e) => {
-                eprintln!("ssh-mcp: mcp socket accept failed: {e}");
+                eprintln!("hekatessh: mcp socket accept failed: {e}");
                 continue;
             }
         };
         if !peer_is_owner(&stream, own_uid) {
-            eprintln!("ssh-mcp: rejected an mcp connection from another user");
+            eprintln!("hekatessh: rejected an mcp connection from another user");
             continue;
         }
-        let server = SshMcpServer::new(pool.clone(), config_path.clone(), audit.clone());
+        let server = HekateSshServer::new(pool.clone(), config_path.clone(), audit.clone());
         tokio::spawn(async move {
             if let Err(e) = server.serve_connection(stream).await {
-                eprintln!("ssh-mcp: mcp session ended: {e:#}");
+                eprintln!("hekatessh: mcp session ended: {e:#}");
             }
         });
     }
@@ -112,12 +112,12 @@ async fn control_loop(
         let stream = match listener.accept().await {
             Ok((stream, _addr)) => stream,
             Err(e) => {
-                eprintln!("ssh-mcp: control socket accept failed: {e}");
+                eprintln!("hekatessh: control socket accept failed: {e}");
                 continue;
             }
         };
         if !peer_is_owner(&stream, own_uid) {
-            eprintln!("ssh-mcp: rejected a control connection from another user");
+            eprintln!("hekatessh: rejected a control connection from another user");
             continue;
         }
         let evaluator = evaluator.clone();

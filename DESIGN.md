@@ -1,6 +1,6 @@
-# ssh-mcp — design
+# HekateSSH — design
 
-This document explains **why** ssh-mcp is shaped the way it is. The
+This document explains **why** HekateSSH is shaped the way it is. The
 [README](README.md) covers the **what** and **how to set it up**.
 
 The core claim: SSH execution is poorly served by the file-grained Claude
@@ -26,7 +26,7 @@ own `ask-permission.py` lean on it — but the hook still has to scrape the
 command string to learn which host the agent is targeting, and the result
 is fragile.
 
-ssh-mcp solves the per-host problem by *being a different tool*. The MCP
+HekateSSH solves the per-host problem by *being a different tool*. The MCP
 server presents structured arguments (`host`, `command`, `op`); the hook
 reads the `host` field directly; the inventory says what each host's
 policy is.
@@ -38,13 +38,13 @@ proposes a host and a command (or a transfer); whether it runs is decided
 by non-model code:
 
 ```
-Claude (model)
+Agent model
   │  proposes mcp__ssh__exec{host, command, op}
   ▼
-Claude Code harness ─spawn→ ssh-mcp serve (shim) ─UDS: mcp.sock─→ ┐
+Host runtime ─spawn→ hekatessh serve (shim) ─UDS: mcp.sock─→ ┐
   │                          stdio↔UDS byte relay only             │
   │                                                                ▼
-  ├─spawn→ ssh-mcp hook ───── UDS: control.sock ────────→ ssh-mcp daemon
+  ├─spawn→ hekatessh hook ───── UDS: control.sock ────────→ hekatessh daemon
   │           policy proxy                              owns inventory,
   │                                                     evaluates policy,
   │  decision ← hook ← daemon                           runs SSH, audits
@@ -58,11 +58,11 @@ One binary, three subcommands:
 
 | Subcommand | Role |
 |---|---|
-| `ssh-mcp daemon` | Resident server, shared by every Claude Code session. Owns the host inventory, the SSH connection pool, policy evaluation, and the audit log. |
-| `ssh-mcp serve`  | Per-session MCP server the harness spawns. A thin shim that relays bytes between the harness's stdio and the daemon's `mcp.sock`; speaks no MCP itself. |
-| `ssh-mcp hook`   | A `PreToolUse` hook program, a pure proxy. Forwards the policy query to the daemon's `control.sock` and returns its decision. Holds no policy logic. |
+| `hekatessh daemon` | Resident server, shared by every host runtime session. Owns the host inventory, the SSH connection pool, policy evaluation, and the audit log. |
+| `hekatessh serve`  | Per-session MCP server the harness spawns. A thin shim that relays bytes between the harness's stdio and the daemon's `mcp.sock`; speaks no MCP itself. |
+| `hekatessh hook`   | A `PreToolUse` hook program, a pure proxy. Forwards the policy query to the daemon's `control.sock` and returns its decision. Holds no policy logic. |
 
-The two UDS sockets live under `~/.ssh/ssh-mcp/`. They are owner-only, the
+The two UDS sockets live under `~/.ssh/hekatessh/`. They are owner-only, the
 daemon checks each connection's peer uid, and there is no TCP port. The
 attack surface is "an attacker with my own uid on my own machine", which
 is the trust boundary the operating system gives you anyway.
@@ -151,7 +151,7 @@ different in standard Unix:
 - the first places `foo.txt` inside `/inbox` (existing directory)
 - the second replaces the file at `/inbox/foo.txt`
 
-`cp` and `rsync` both follow this rule. Earlier versions of ssh-mcp did
+`cp` and `rsync` both follow this rule. Earlier versions of HekateSSH did
 not — they always replaced the target — and the failure mode was severe:
 `get remote=/tmp/.claude local=~` would have replaced the home
 directory wholesale with the downloaded entry.
@@ -232,7 +232,7 @@ Models running shells reflexively pipe through `tail`, `head`, and
 exec: most of the time the agent wants the last error line, the first
 hit, or a count.
 
-ssh-mcp lifts that into the tool surface as a composable **op
+HekateSSH lifts that into the tool surface as a composable **op
 pipeline**: an ordered array of steps, each step being one of
 `{full: true}`, `{head: N}`, `{tail: N}`, `{grep: STR}`. Steps apply
 in order; the implicit start is the full body. Two consequences
@@ -333,7 +333,7 @@ Second, accumulating "all stdout, then all stderr" loses the temporal
 interleaving. A build log where stderr warnings land between stdout
 progress lines reads back as two disconnected blocks.
 
-ssh-mcp's trace addresses both. Lines are stored with an explicit
+HekateSSH's trace addresses both. Lines are stored with an explicit
 channel tag — `Stdout`, `Stderr`, or `Transfer` — and the exec
 collector preserves the raw arrival order of stdout and stderr
 chunks. The trace handler splits those chunks into ordered,
@@ -372,7 +372,7 @@ applied.
 
 russh, the Rust SSH client, exposes connections and channels as separate
 objects. One authenticated connection can carry many channels; each
-`exec` runs on its own short-lived channel. ssh-mcp reuses this directly:
+`exec` runs on its own short-lived channel. HekateSSH reuses this directly:
 
 - One russh `Handle` per host, kept in an in-process pool, shared across
   every MCP session.
@@ -389,7 +389,7 @@ project working tree and a remote host has no equivalent anchor — making
 remote `exec` stateless matches the "outside the working tree" behavior
 of the local tool, and the simplicity is its own reward.
 
-Authentication is via the SSH agent (no key material crosses ssh-mcp's
+Authentication is via the SSH agent (no key material crosses HekateSSH's
 process boundary). Host keys are checked strictly against
 `~/.ssh/known_hosts`.
 
@@ -423,11 +423,11 @@ matched.
 The whole arrangement rests on a small set of files. If the agent can
 edit them, the policy is fiction:
 
-- `~/.ssh/ssh-mcp.toml` — the inventory and per-host policy.
+- `~/.ssh/hekatessh.toml` — the inventory and per-host policy.
 - `~/.claude/settings.json` — user-level Claude Code permissions and the
   hook wiring.
 - `~/.claude.json` — the MCP server registration.
-- The `ssh-mcp` binary itself.
+- The `hekatessh` binary itself.
 
 These should be on the `permissions.ask` (or `deny`) list. Setup
 instructions in the README spell out the exact rules.
@@ -435,14 +435,14 @@ instructions in the README spell out the exact rules.
 There is still a residual exposure: a sufficiently general `Bash(...)`
 allow could in principle let the agent write to these files through the
 shell. Closing that hole completely would require a sandbox layer.
-ssh-mcp does not claim to be that.
+HekateSSH does not claim to be that.
 
 ## 9. What's deliberately out of scope
 
 A few decisions are explicit non-features:
 
 - **Remote `managed-settings.json` is not consulted.** The remote host's
-  organization policy is its own to enforce; ssh-mcp does not try to
+  organization policy is its own to enforce; HekateSSH does not try to
   read it across the SSH connection. The added complexity (remote-OS
   path variation, caching, unavailability handling) is not worth it
   while the user's own gates and the remote's own access controls
@@ -486,7 +486,7 @@ A handful of paths were tried or considered and dropped:
 ## 11. Audit trail
 
 Every decision the daemon makes — exec, transfer, or hook query — is
-appended to `~/.ssh/ssh-mcp/audit.jsonl` as a single JSON object per
+appended to `~/.ssh/hekatessh/audit.jsonl` as a single JSON object per
 line. Entries record the host alias, the subject (command or paths),
 the permission mode, and the final decision. Secret-shaped environment
 assignments in command strings are masked.

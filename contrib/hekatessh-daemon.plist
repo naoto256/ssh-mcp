@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  LaunchAgent for the ssh-mcp daemon.
+  LaunchAgent for the HekateSSH daemon.
 
-  Replace /ABSOLUTE/PATH/TO/ssh-mcp with the absolute path of your installed
+  Replace /ABSOLUTE/PATH/TO/hekatessh with the absolute path of your installed
   binary, copy this file to ~/Library/LaunchAgents/, then run:
 
-    launchctl load ~/Library/LaunchAgents/ssh-mcp-daemon.plist
+    launchctl load ~/Library/LaunchAgents/hekatessh-daemon.plist
 
   If the daemon cannot reach your SSH agent, add an <EnvironmentVariables>
   dict that sets SSH_AUTH_SOCK to its socket path.
@@ -14,10 +14,10 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>ssh-mcp-daemon</string>
+    <string>hekatessh-daemon</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/ABSOLUTE/PATH/TO/ssh-mcp</string>
+        <string>/ABSOLUTE/PATH/TO/hekatessh</string>
         <string>daemon</string>
     </array>
     <key>RunAtLoad</key>
@@ -25,6 +25,6 @@
     <key>KeepAlive</key>
     <true/>
     <key>StandardErrorPath</key>
-    <string>/tmp/ssh-mcp-daemon.log</string>
+    <string>/tmp/hekatessh-daemon.log</string>
 </dict>
 </plist>

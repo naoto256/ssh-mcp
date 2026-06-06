@@ -3,7 +3,7 @@
 //!
 //! The model never sees private key material — the agent socket is the only
 //! thing that can sign, and we only read public bytes. The tool exists so
-//! Claude can tell the user *which* `authorized_keys` line to paste onto a
+//! The agent can tell the user *which* `authorized_keys` line to paste onto a
 //! freshly proposed host, and to diagnose "agent has no key" failures.
 //!
 //! Certificate identities (`AgentIdentity::Certificate`) are skipped — they
@@ -15,10 +15,12 @@ use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::AgentClient;
 use russh::keys::ssh_key::HashAlg;
 
-use crate::mcp::SshMcpServer;
+use crate::mcp::HekateSshServer;
 use crate::mcp::types::{AgentKey, AgentKeyList};
 
-pub(in crate::mcp) async fn handle(_server: &SshMcpServer) -> Result<Json<AgentKeyList>, String> {
+pub(in crate::mcp) async fn handle(
+    _server: &HekateSshServer,
+) -> Result<Json<AgentKeyList>, String> {
     let mut agent = AgentClient::connect_env()
         .await
         .map_err(|e| format!("could not reach the SSH agent ($SSH_AUTH_SOCK): {e}"))?;

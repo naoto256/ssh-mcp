@@ -1,11 +1,11 @@
 [package]
-name = "ssh-mcp"
+name = "hekatessh"
 version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Policy-gated SSH execution MCP server for Claude Code and Codex"
-repository = "https://github.com/naoto256/ssh-mcp"
-homepage = "https://github.com/naoto256/ssh-mcp"
+repository = "https://github.com/naoto256/hekatessh"
+homepage = "https://github.com/naoto256/hekatessh"
 readme = "README.md"
 keywords = ["mcp", "ssh", "claude-code", "codex", "automation"]
 categories = ["command-line-utilities", "development-tools"]
@@ -56,9 +56,9 @@ depends = "$auto, systemd"
 section = "utils"
 priority = "optional"
 assets = [
-    ["target/release/ssh-mcp", "usr/bin/ssh-mcp", "755"],
-    ["README.md", "usr/share/doc/ssh-mcp/README.md", "644"],
-    ["LICENSE-APACHE", "usr/share/doc/ssh-mcp/LICENSE-APACHE", "644"],
-    ["LICENSE-MIT", "usr/share/doc/ssh-mcp/LICENSE-MIT", "644"],
-    ["dist/deb/systemd/ssh-mcp.service", "usr/lib/systemd/user/ssh-mcp.service", "644"],
+    ["target/release/hekatessh", "usr/bin/hekatessh", "755"],
+    ["README.md", "usr/share/doc/hekatessh/README.md", "644"],
+    ["LICENSE-APACHE", "usr/share/doc/hekatessh/LICENSE-APACHE", "644"],
+    ["LICENSE-MIT", "usr/share/doc/hekatessh/LICENSE-MIT", "644"],
+    ["dist/deb/systemd/hekatessh.service", "usr/lib/systemd/user/hekatessh.service", "644"],
 ]

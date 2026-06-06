@@ -11,8 +11,8 @@
 
 use std::time::Duration;
 
-use ssh_mcp::config::HostsConfig;
-use ssh_mcp::ssh::ConnectionPool;
+use hekatessh::config::HostsConfig;
+use hekatessh::ssh::ConnectionPool;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -30,7 +30,7 @@ fn test_config() -> HostsConfig {
 
 /// A unique remote path under `/tmp`, so concurrent runs do not collide.
 fn remote_path(label: &str) -> String {
-    format!("/tmp/ssh-mcp-e2e-{label}-{}", std::process::id())
+    format!("/tmp/hekatessh-e2e-{label}-{}", std::process::id())
 }
 
 #[tokio::test]

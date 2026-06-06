@@ -1,13 +1,13 @@
-# A user systemd service for the ssh-mcp daemon.
+# A user systemd service for the HekateSSH daemon.
 #
 # Install with:
 #   mkdir -p ~/.config/systemd/user
-#   cp contrib/ssh-mcp-daemon.service ~/.config/systemd/user/
+#   cp contrib/hekatessh-daemon.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload
-#   systemctl --user enable --now ssh-mcp-daemon
+#   systemctl --user enable --now hekatessh-daemon
 #
-# Logs:  journalctl --user -u ssh-mcp-daemon
-# Stop:  systemctl --user stop ssh-mcp-daemon
+# Logs:  journalctl --user -u hekatessh-daemon
+# Stop:  systemctl --user stop hekatessh-daemon
 #
 # The daemon needs SSH_AUTH_SOCK to reach your SSH agent. Adjust the
 # Environment= line below if your agent socket lives elsewhere — common
@@ -15,7 +15,7 @@
 # (manual ssh-agent under systemd).
 
 [Unit]
-Description=ssh-mcp daemon (policy-gated SSH MCP server)
+Description=HekateSSH daemon (policy-gated SSH MCP server)
 # The daemon is lazy about SSH connections (no peers to reach at startup),
 # so there's nothing meaningful to wait on.
 
@@ -23,7 +23,7 @@ Description=ssh-mcp daemon (policy-gated SSH MCP server)
 Type=simple
 # %h expands to the user's home directory. Adjust if you installed
 # elsewhere.
-ExecStart=%h/.local/bin/ssh-mcp daemon
+ExecStart=%h/.local/bin/hekatessh daemon
 # Restart if the daemon crashes — without it, the hook fails closed and
 # every gated tool call denies until you remember to bring it back up.
 Restart=on-failure

@@ -14,7 +14,7 @@ ignore = [
     # RSA "Marvin Attack" timing side-channel. No upstream fix is
     # available yet (tracked in the rsa crate's own issue tracker).
     # russh pulls rsa transitively through ssh-key for SSH RSA key
-    # handling. ssh-mcp is an SSH *client* that connects to hosts the
+    # handling. HekateSSH is an SSH *client* that connects to hosts the
     # operator has put in their own inventory — the threat model
     # requires the attacker to be the SSH server able to observe
     # timing, which is the host the user explicitly chose to trust.

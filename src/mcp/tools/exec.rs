@@ -8,7 +8,7 @@ use rmcp::Json;
 use rmcp::handler::server::wrapper::Parameters;
 
 use crate::config::HostsConfig;
-use crate::mcp::SshMcpServer;
+use crate::mcp::HekateSshServer;
 use crate::mcp::types::{ExecParams, ExecResult};
 use crate::trace::{TraceEntry, apply_pipeline, chunks_to_lines, validate_pipeline};
 
@@ -17,7 +17,7 @@ use crate::trace::{TraceEntry, apply_pipeline, chunks_to_lines, validate_pipelin
 const INLINE_BYTE_CAP: usize = 64 * 1024;
 
 pub(in crate::mcp) async fn handle(
-    server: &SshMcpServer,
+    server: &HekateSshServer,
     params: Parameters<ExecParams>,
 ) -> Result<Json<ExecResult>, String> {
     let ExecParams { host, command, op } = params.0;

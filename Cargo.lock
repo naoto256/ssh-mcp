@@ -1011,6 +1011,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hekatessh"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "clap",
+ "encoding_rs",
+ "flate2",
+ "globset",
+ "jiff",
+ "libc",
+ "rand 0.9.4",
+ "regex",
+ "rmcp",
+ "russh",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "walkdir",
+]
+
+[[package]]
 name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2240,34 +2268,6 @@ dependencies = [
  "ssh-cipher",
  "ssh-encoding",
  "zeroize",
-]
-
-[[package]]
-name = "ssh-mcp"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "base64",
- "clap",
- "encoding_rs",
- "flate2",
- "globset",
- "jiff",
- "libc",
- "rand 0.9.4",
- "regex",
- "rmcp",
- "russh",
- "schemars",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tar",
- "tempfile",
- "tokio",
- "toml",
- "toml_edit",
- "walkdir",
 ]
 
 [[package]]

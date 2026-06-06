@@ -129,14 +129,14 @@ impl AuditLog {
     /// is reported to stderr and dropped.
     fn write(&self, entry: AuditEntry<'_>) {
         if let Err(e) = self.append(&entry) {
-            eprintln!("ssh-mcp: could not write the audit log: {e:#}");
+            eprintln!("hekatessh: could not write the audit log: {e:#}");
         }
     }
 
     fn append(&self, entry: &AuditEntry<'_>) -> Result<()> {
         let mut line = serde_json::to_string(entry)?;
         line.push('\n');
-        // Owner-only at the file level too: the parent `~/.ssh/ssh-mcp/`
+        // Owner-only at the file level too: the parent `~/.ssh/hekatessh/`
         // is already 0o700, but pinning the file mode keeps the record
         // private even if someone later loosens the directory.
         let mut file = OpenOptions::new()
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn writes_a_transfer_entry() {
         let path =
-            std::env::temp_dir().join(format!("ssh-mcp-audit-xfer-{}.jsonl", std::process::id()));
+            std::env::temp_dir().join(format!("hekatessh-audit-xfer-{}.jsonl", std::process::id()));
         let log = AuditLog::new(path.clone());
         log.record_transfer(
             "get",
@@ -197,7 +197,8 @@ mod tests {
 
     #[test]
     fn writes_tagged_jsonl_lines() {
-        let path = std::env::temp_dir().join(format!("ssh-mcp-audit-{}.jsonl", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("hekatessh-audit-{}.jsonl", std::process::id()));
         let log = AuditLog::new(path.clone());
         log.record_exec("build-rig", "TOKEN=secret echo hi", Some(0), None);
         log.record_decision("prod-db", "rm -rf /", "default", "deny");

@@ -1,9 +1,9 @@
 [Unit]
-Description=ssh-mcp daemon (policy-gated SSH MCP server)
+Description=HekateSSH daemon (policy-gated SSH MCP server)
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/ssh-mcp daemon
+ExecStart=/usr/bin/hekatessh daemon
 Restart=on-failure
 RestartSec=2
 

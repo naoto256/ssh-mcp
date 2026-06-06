@@ -1,13 +1,13 @@
 {
   "permissions": {
     "deny": [
-      "Edit(~/.ssh/ssh-mcp.toml)",
-      "Edit(~/.ssh/ssh-mcp.ephem.toml)",
-      "Edit(~/.ssh/ssh-mcp/**)"
+      "Edit(~/.ssh/hekatessh.toml)",
+      "Edit(~/.ssh/hekatessh.ephem.toml)",
+      "Edit(~/.ssh/hekatessh/**)"
     ],
     "ask": [
       "Bash(ssh *)",
-      "Edit(~/.local/bin/ssh-mcp)"
+      "Edit(~/.local/bin/hekatessh)"
     ]
   }
 }

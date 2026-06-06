@@ -2,9 +2,9 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "ssh-mcp",
+    name = "hekatessh",
     version,
-    about = "Policy-gated SSH execution MCP server for Claude Code"
+    about = "Policy-gated SSH execution MCP server for Claude Code and Codex"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -22,16 +22,16 @@ enum Command {
     /// Run as a PreToolUse hook: a pure proxy that relays a policy query to
     /// the daemon.
     Hook,
-    /// Bootstrap an ssh-mcp.toml skeleton from ~/.ssh/config.
+    /// Bootstrap a hekatessh.toml skeleton from ~/.ssh/config.
     Import,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Daemon => ssh_mcp::daemon::run(),
-        Command::Serve => ssh_mcp::serve::run(),
-        Command::Hook => ssh_mcp::hook::run(),
-        Command::Import => ssh_mcp::import::run(),
+        Command::Daemon => hekatessh::daemon::run(),
+        Command::Serve => hekatessh::serve::run(),
+        Command::Hook => hekatessh::hook::run(),
+        Command::Import => hekatessh::import::run(),
     }
 }

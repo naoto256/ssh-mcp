@@ -1,9 +1,9 @@
 {
-  "name": "naoto256-ssh-mcp",
+  "name": "naoto256-hekatessh",
   "plugins": [
     {
-      "name": "ssh-mcp",
-      "description": "Policy-gated SSH execution over MCP, with a bundled PreToolUse policy hook.",
+      "name": "hekatessh",
+      "description": "HekateSSH policy-gated SSH execution over MCP, with a bundled PreToolUse policy hook.",
       "source": {
         "source": "local",
         "path": "./plugin"

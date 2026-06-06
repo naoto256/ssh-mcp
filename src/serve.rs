@@ -20,7 +20,7 @@ async fn relay() -> Result<()> {
     let socket = crate::paths::mcp_socket()?;
     let stream = UnixStream::connect(&socket).await.with_context(|| {
         format!(
-            "the ssh-mcp daemon is not reachable at {} — is it running?",
+            "the hekatessh daemon is not reachable at {} — is it running?",
             socket.display()
         )
     })?;

@@ -1,5 +1,5 @@
 {
-  "name": "ssh-mcp",
+  "name": "hekatessh",
   "description": "Policy-gated SSH execution MCP server for Claude Code and Codex. Bundles the ssh MCP server plus its PreToolUse policy hook.",
   "version": "0.2.4",
   "author": {

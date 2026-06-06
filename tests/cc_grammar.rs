@@ -1,8 +1,8 @@
 //! End-to-end coverage of the Claude Code permission grammar, exercised
 //! through the public evaluator API.
 
-use ssh_mcp::config::{HostsConfig, Permissions};
-use ssh_mcp::policy::{Decision, Evaluator, PermissionSet, Tool};
+use hekatessh::config::{HostsConfig, Permissions};
+use hekatessh::policy::{Decision, Evaluator, PermissionSet, Tool};
 use std::path::PathBuf;
 
 /// Build a rule set from the three lists.

@@ -2,7 +2,7 @@
   "mcpServers": {
     "ssh": {
       "type": "stdio",
-      "command": "ssh-mcp",
+      "command": "hekatessh",
       "args": ["serve"],
       "env": {},
       "timeout": 900000

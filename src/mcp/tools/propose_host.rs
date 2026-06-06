@@ -25,7 +25,7 @@ use russh::keys::ssh_key;
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 use crate::config::{HostsConfig, ephemeral_file_for};
-use crate::mcp::SshMcpServer;
+use crate::mcp::HekateSshServer;
 use crate::mcp::types::{ProposeHostParams, ProposeHostResult};
 
 /// Maximum allowed gap between "now" and `expires_at`. Keeps the inventory
@@ -38,7 +38,7 @@ const MAX_EXPIRES_HORIZON: SignedDuration = SignedDuration::from_hours(24 * 30);
 const ALIAS_RETRIES: usize = 10;
 
 pub(in crate::mcp) async fn handle(
-    server: &SshMcpServer,
+    server: &HekateSshServer,
     params: Parameters<ProposeHostParams>,
 ) -> Result<Json<ProposeHostResult>, String> {
     let params = params.0;

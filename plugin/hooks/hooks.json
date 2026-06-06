@@ -1,5 +1,5 @@
 {
-  "description": "ssh-mcp PreToolUse hook: delegate host-affecting ssh MCP tool calls to the resident ssh-mcp daemon policy gate.",
+  "description": "HekateSSH PreToolUse hook: delegate host-affecting ssh MCP tool calls to the resident HekateSSH daemon policy gate.",
   "hooks": {
     "PreToolUse": [
       {
@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/tools/ssh-mcp-hook.sh\"",
+            "command": "\"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/tools/hekatessh-hook.sh\"",
             "timeout": 5
           }
         ]

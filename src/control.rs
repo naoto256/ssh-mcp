@@ -86,12 +86,12 @@ pub async fn handle_connection(
     audit: &AuditLog,
 ) {
     let (decision, reason) = match process(&mut stream, config_path, evaluator, pool, audit).await {
-        Ok((host, decision)) => (decision, format!("ssh-mcp policy for host {host:?}")),
+        Ok((host, decision)) => (decision, format!("hekatessh policy for host {host:?}")),
         Err(e) => {
-            eprintln!("ssh-mcp: control request failed, denying: {e:#}");
+            eprintln!("hekatessh: control request failed, denying: {e:#}");
             (
                 Decision::Deny,
-                format!("ssh-mcp could not evaluate the request: {e:#}"),
+                format!("hekatessh could not evaluate the request: {e:#}"),
             )
         }
     };
@@ -232,7 +232,7 @@ async fn decide_subject(
     let rule_gates = match evaluator.evaluate_rule_gates(config, host_entry, &subject) {
         Ok(gates) => gates,
         Err(e) => {
-            eprintln!("ssh-mcp: rule evaluation failed, denying: {e:#}");
+            eprintln!("hekatessh: rule evaluation failed, denying: {e:#}");
             return Decision::Deny;
         }
     };
@@ -264,14 +264,14 @@ async fn decide_transfer(
     let remote = match normalize_remote(transfer.remote_path) {
         Ok(path) => path,
         Err(e) => {
-            eprintln!("ssh-mcp: rejecting a transfer with a bad remote path: {e:#}");
+            eprintln!("hekatessh: rejecting a transfer with a bad remote path: {e:#}");
             return Decision::Deny;
         }
     };
     let local_buf = match normalize_local(transfer.local_path) {
         Ok(path) => path,
         Err(e) => {
-            eprintln!("ssh-mcp: rejecting a transfer with a bad local path: {e:#}");
+            eprintln!("hekatessh: rejecting a transfer with a bad local path: {e:#}");
             return Decision::Deny;
         }
     };
@@ -316,7 +316,7 @@ async fn decide_transfer(
     let local_decision = match evaluator.check_user_path(local_tool, &local) {
         Ok(decision) => combine_gates(&[decision], fallback),
         Err(e) => {
-            eprintln!("ssh-mcp: local policy check failed, denying: {e:#}");
+            eprintln!("hekatessh: local policy check failed, denying: {e:#}");
             return Decision::Deny;
         }
     };
@@ -360,7 +360,7 @@ async fn decide_sync(
     let local_excludes = match changeset::compile_excludes(transfer.exclude) {
         Ok(set) => set,
         Err(e) => {
-            eprintln!("ssh-mcp: invalid exclude in sync request: {e:#}");
+            eprintln!("hekatessh: invalid exclude in sync request: {e:#}");
             return Decision::Deny;
         }
     };
@@ -375,7 +375,7 @@ async fn decide_sync(
     let local_paths = match changeset::walk_local_paths(local, &empty, &local_excludes) {
         Ok(set) => set,
         Err(e) => {
-            eprintln!("ssh-mcp: local walk failed in sync gate: {e:#}");
+            eprintln!("hekatessh: local walk failed in sync gate: {e:#}");
             return Decision::Deny;
         }
     };
@@ -388,7 +388,7 @@ async fn decide_sync(
     let remote_os = match pool.remote_os(config, host).await {
         Ok(os) => os,
         Err(e) => {
-            eprintln!("ssh-mcp: cannot determine remote OS for sync gate: {e:#}");
+            eprintln!("hekatessh: cannot determine remote OS for sync gate: {e:#}");
             return Decision::Deny;
         }
     };
@@ -397,14 +397,14 @@ async fn decide_sync(
         Ok(out) if out.exit_code == 0 => out.stdout,
         Ok(out) => {
             eprintln!(
-                "ssh-mcp: remote walk in sync gate exited {}: {}",
+                "hekatessh: remote walk in sync gate exited {}: {}",
                 out.exit_code,
                 out.stderr.trim()
             );
             return Decision::Deny;
         }
         Err(e) => {
-            eprintln!("ssh-mcp: remote walk in sync gate failed: {e:#}");
+            eprintln!("hekatessh: remote walk in sync gate failed: {e:#}");
             return Decision::Deny;
         }
     };
@@ -448,7 +448,7 @@ async fn decide_sync(
         let local_d = match evaluator.check_user_path(local_tool, &local_abs_display) {
             Ok(d) => combine_gates(&[d], fallback),
             Err(e) => {
-                eprintln!("ssh-mcp: local policy check failed in sync gate: {e:#}");
+                eprintln!("hekatessh: local policy check failed in sync gate: {e:#}");
                 return Decision::Deny;
             }
         };
@@ -479,7 +479,7 @@ async fn run_subhook(program: &str, raw_request: &str) -> Decision {
     match spawn_subhook(program, raw_request).await {
         Ok(decision) => decision,
         Err(e) => {
-            eprintln!("ssh-mcp: hook gate {program:?} failed, denying: {e:#}");
+            eprintln!("hekatessh: hook gate {program:?} failed, denying: {e:#}");
             Decision::Deny
         }
     }

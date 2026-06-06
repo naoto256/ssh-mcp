@@ -4,12 +4,12 @@
 use rmcp::Json;
 use rmcp::handler::server::wrapper::Parameters;
 
-use crate::mcp::SshMcpServer;
+use crate::mcp::HekateSshServer;
 use crate::mcp::types::{TraceParams, TraceResult};
 use crate::trace::{Channel, Stream, TraceLine, apply_tagged_pipeline, validate_pipeline};
 
 pub(in crate::mcp) async fn handle(
-    server: &SshMcpServer,
+    server: &HekateSshServer,
     params: Parameters<TraceParams>,
 ) -> Result<Json<TraceResult>, String> {
     let TraceParams {

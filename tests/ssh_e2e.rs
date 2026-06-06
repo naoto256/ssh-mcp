@@ -11,8 +11,8 @@
 
 use std::time::Duration;
 
-use ssh_mcp::config::HostsConfig;
-use ssh_mcp::ssh::ConnectionPool;
+use hekatessh::config::HostsConfig;
+use hekatessh::ssh::ConnectionPool;
 
 /// A one-host inventory built from the environment, so the real host's
 /// address and user never appear in committed source.
@@ -36,13 +36,13 @@ async fn exec_returns_stdout_and_exit_code() {
         .exec(
             &config,
             "target",
-            "echo ssh-mcp-ok",
+            "echo hekatessh-ok",
             Duration::from_secs(20),
         )
         .await
         .expect("exec should succeed");
 
-    assert_eq!(out.stdout.trim(), "ssh-mcp-ok");
+    assert_eq!(out.stdout.trim(), "hekatessh-ok");
     assert_eq!(out.stderr, "");
     assert_eq!(out.exit_code, 0);
 }
