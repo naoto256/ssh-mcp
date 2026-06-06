@@ -286,9 +286,11 @@ impl ConnectionPool {
             let target = local_path.join(rel);
             if let Ok(meta) = target.symlink_metadata() {
                 if meta.is_dir() {
-                    let _ = std::fs::remove_dir_all(&target);
+                    std::fs::remove_dir_all(&target)
+                        .with_context(|| format!("deleting local sync target {}", rel.display()))?;
                 } else {
-                    let _ = std::fs::remove_file(&target);
+                    std::fs::remove_file(&target)
+                        .with_context(|| format!("deleting local sync target {}", rel.display()))?;
                 }
             }
         }
