@@ -1,6 +1,6 @@
 {
   "name": "ssh-mcp",
-  "version": "0.2.4",
+  "version": "0.3.1",
   "description": "Policy-gated SSH execution MCP server for Claude Code and Codex. Bundles the ssh MCP server plus its PreToolUse policy hook.",
   "author": {
     "name": "Naoto Morishima"

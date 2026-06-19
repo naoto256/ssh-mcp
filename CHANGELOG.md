@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-19
+
+### Fixed
+
+- Fix the `PreToolUse` policy hook never firing under Claude Code. The hook matcher and the daemon's transfer-tool routing both assumed the bare `mcp__ssh__<tool>` name, but Claude Code namespaces plugin MCP tools as `mcp__plugin_ssh-mcp_ssh__<tool>`, so host-affecting calls bypassed the policy gate entirely. The matcher now accepts both namings and transfer routing keys on the operation suffix. Codex, which keeps the bare `mcp__ssh__<tool>` name, was unaffected and stays working.
+
 ## [0.3.0] - 2026-06-06
 
 ### Added
