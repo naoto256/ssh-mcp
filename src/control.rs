@@ -50,14 +50,14 @@ struct ToolInput {
 }
 
 /// The direction of a file transfer.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransferDir {
     Get,
     Put,
 }
 
 /// Shape of the transfer for gating purposes.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransferKind {
     /// `get_file` / `put_file`: single source path, cp-merge target, one
     /// `(remote_path, local_path)` pair to gate.
@@ -130,8 +130,8 @@ async fn process(
     let config = HostsConfig::load(config_path).context("loading the host inventory")?;
 
     let tool = request.tool_name.as_deref().unwrap_or_default();
-    let (decision, summary) = match tool {
-        "mcp__ssh__get" | "mcp__ssh__put" | "mcp__ssh__sync_get" | "mcp__ssh__sync_put" => {
+    let (decision, summary) = match transfer_op(tool) {
+        Some((direction, kind)) => {
             let remote = request
                 .tool_input
                 .remote_path
@@ -143,16 +143,6 @@ async fn process(
                 .clone()
                 .context("the transfer request carries no local_path")?;
             let exclude = request.tool_input.exclude.clone();
-            let direction = if matches!(tool, "mcp__ssh__get" | "mcp__ssh__sync_get") {
-                TransferDir::Get
-            } else {
-                TransferDir::Put
-            };
-            let kind = if matches!(tool, "mcp__ssh__sync_get" | "mcp__ssh__sync_put") {
-                TransferKind::Sync
-            } else {
-                TransferKind::Single
-            };
             let transfer = Transfer {
                 direction,
                 kind,
@@ -185,6 +175,23 @@ async fn process(
 
     audit.record_decision(&host, &summary, &mode, decision_label(decision));
     Ok((host, decision))
+}
+
+/// Classify a tool name as a file transfer, returning its direction and shape,
+/// or `None` for `exec` and everything else.
+///
+/// The match is on the operation suffix after the final `__`, not the whole
+/// name, because plugin namespacing differs by host: Claude Code exposes the
+/// tool as `mcp__plugin_ssh-mcp_ssh__get` while Codex keeps the bare
+/// `mcp__ssh__get`. Routing on the suffix resolves both forms identically.
+fn transfer_op(tool: &str) -> Option<(TransferDir, TransferKind)> {
+    match tool.rsplit("__").next().unwrap_or_default() {
+        "get" => Some((TransferDir::Get, TransferKind::Single)),
+        "put" => Some((TransferDir::Put, TransferKind::Single)),
+        "sync_get" => Some((TransferDir::Get, TransferKind::Sync)),
+        "sync_put" => Some((TransferDir::Put, TransferKind::Sync)),
+        _ => None,
+    }
 }
 
 /// The no-match fallback for a permission mode. Claude Code's `default` mode
@@ -598,6 +605,33 @@ mod tests {
     #[test]
     fn invalid_hook_output_is_an_error() {
         assert!(parse_hook_decision(b"not json").is_err());
+    }
+
+    #[test]
+    fn transfer_op_routes_both_namespacings() {
+        // Codex's bare naming and Claude Code's plugin-prefixed naming must
+        // resolve to the same transfer classification.
+        for prefix in ["mcp__ssh__", "mcp__plugin_ssh-mcp_ssh__"] {
+            assert_eq!(
+                transfer_op(&format!("{prefix}get")),
+                Some((TransferDir::Get, TransferKind::Single))
+            );
+            assert_eq!(
+                transfer_op(&format!("{prefix}put")),
+                Some((TransferDir::Put, TransferKind::Single))
+            );
+            assert_eq!(
+                transfer_op(&format!("{prefix}sync_get")),
+                Some((TransferDir::Get, TransferKind::Sync))
+            );
+            assert_eq!(
+                transfer_op(&format!("{prefix}sync_put")),
+                Some((TransferDir::Put, TransferKind::Sync))
+            );
+            // `exec` and unknown tools are not transfers.
+            assert_eq!(transfer_op(&format!("{prefix}exec")), None);
+        }
+        assert_eq!(transfer_op(""), None);
     }
 
     #[test]
