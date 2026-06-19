@@ -1,5 +1,4 @@
 {
-  "description": "ssh-mcp PreToolUse hook: delegate host-affecting ssh MCP tool calls to the resident ssh-mcp daemon policy gate. The optional `plugin_ssh-mcp_` prefix in the matcher covers both namings: Claude Code exposes plugin MCP tools as mcp__plugin_<plugin>_<server>__<tool> (mcp__plugin_ssh-mcp_ssh__exec), while Codex keeps the bare mcp__<server>__<tool> (mcp__ssh__exec).",
   "hooks": {
     "PreToolUse": [
       {

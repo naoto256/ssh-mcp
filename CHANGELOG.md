@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Fix the `PreToolUse` policy hook never firing under Claude Code. The hook matcher and the daemon's transfer-tool routing both assumed the bare `mcp__ssh__<tool>` name, but Claude Code namespaces plugin MCP tools as `mcp__plugin_ssh-mcp_ssh__<tool>`, so host-affecting calls bypassed the policy gate entirely. The matcher now accepts both namings and transfer routing keys on the operation suffix. Codex, which keeps the bare `mcp__ssh__<tool>` name, was unaffected and stays working.
+- Fix the `PreToolUse` policy hook never firing under Claude Code. The hook matcher and the daemon's transfer-tool routing both assumed the bare `mcp__ssh__<tool>` name, but Claude Code namespaces plugin MCP tools as `mcp__plugin_ssh-mcp_ssh__<tool>`, so host-affecting calls bypassed the policy gate entirely. The matcher now accepts both namings and transfer routing keys on the operation suffix.
+- Drop the unsupported top-level `description` field from the plugin `hooks/hooks.json`. Codex's plugin-hooks parser is strict and accepts only `hooks`, so the field made it reject the file and the policy hook never loaded under Codex at all. With it removed, the hook loads on both Codex and Claude Code.
 
 ## [0.3.0] - 2026-06-06
 
